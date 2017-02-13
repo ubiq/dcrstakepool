@@ -32,7 +32,7 @@
 		{{if .StakeInfo.Expired}}
 		<tr><td><span style="font-size: larger;">Expired:</span></td><td><span id="Expired">{{ .StakeInfo.Expired }}</span></td></tr>
 		{{end}}
-		<tr><td><span style="font-size: larger;">Revoked:</span></td><td><span id="Revoked">{{ .StakeInfo.Revoked }}</span></td></tr>
+		<tr style="display: none;"><td>Revoked:</td><td><span id="Revoked">{{ .StakeInfo.Revoked }}</span></td></tr>
 		<tr style="display: none;"><td>ProportionMissed:</td><td><span id="ProportionMissed">{{ .StakeInfo.ProportionMissed }}</span></td></tr>
 		<tr><td><span style="font-size: larger;">Pool Size:</span></td><td><span id="PoolSize">{{ .StakeInfo.PoolSize }}</span></td></tr>
 		<tr><td><span style="font-size: larger;">AllMempoolTix:</span></td><td><span id="AllMempoolTix">{{ .StakeInfo.AllMempoolTix }}</span></td></tr>
