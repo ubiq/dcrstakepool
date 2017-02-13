@@ -39,7 +39,7 @@ const signupEmailTemplate = "A request for an account for __URL__\r\n" +
 	"If you made this request, follow the link below:\r\n\n" +
 	"__URL__/emailverify?t=__TOKEN__\r\n\n" +
 	"to verify your email address and finalize registration.\r\n\n"
-const signupEmailSubject = "Stake pool email verification"
+const signupEmailSubject = "Ubiq Stake Pool email verification"
 
 // MainController is the wallet RPC controller type.  Its methods include the
 // route handlers.
