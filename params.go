@@ -18,7 +18,8 @@ var activeNetParams = &mainNetParams
 // network and test networks.
 type params struct {
 	*chaincfg.Params
-	WalletRPCServerPort string
+	StakepooldRPCServerPort string
+	WalletRPCServerPort     string
 }
 
 // mainNetParams contains parameters specific to the main network
@@ -28,23 +29,27 @@ type params struct {
 // it does not handle on to dcrd.  This approach allows the wallet process
 // to emulate the full reference implementation RPC API.
 var mainNetParams = params{
-	Params:              &chaincfg.MainNetParams,
-	WalletRPCServerPort: "9110",
+	Params:                  &chaincfg.MainNetParams,
+	StakepooldRPCServerPort: "9113",
+	WalletRPCServerPort:     "9110",
 }
 
-// testNetParams contains parameters specific to the test network (version 0)
+// testNet2Params contains parameters specific to the test network (version 0)
 // (wire.TestNet).  NOTE: The RPC port is intentionally different than the
 // reference implementation - see the mainNetParams comment for details.
-var testNetParams = params{
-	Params:              &chaincfg.TestNetParams,
-	WalletRPCServerPort: "19110",
+
+var testNet2Params = params{
+	Params:                  &chaincfg.TestNet2Params,
+	StakepooldRPCServerPort: "19113",
+	WalletRPCServerPort:     "19110",
 }
 
 // simNetParams contains parameters specific to the simulation test network
 // (wire.SimNet).
 var simNetParams = params{
-	Params:              &chaincfg.SimNetParams,
-	WalletRPCServerPort: "19557",
+	Params:                  &chaincfg.SimNetParams,
+	StakepooldRPCServerPort: "19560",
+	WalletRPCServerPort:     "19557",
 }
 
 // netName returns the name used when referring to a decred network.  At the
@@ -58,8 +63,8 @@ var simNetParams = params{
 // removed and the network parameter's name used instead.
 func netName(chainParams *params) string {
 	switch chainParams.Net {
-	case wire.TestNet:
-		return "testnet"
+	case wire.TestNet2:
+		return "testnet2"
 	default:
 		return chainParams.Name
 	}

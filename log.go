@@ -12,6 +12,7 @@ import (
 	"github.com/btcsuite/seelog"
 	"github.com/decred/dcrstakepool/controllers"
 	"github.com/decred/dcrstakepool/models"
+	"github.com/decred/dcrstakepool/stakepooldclient"
 	"github.com/decred/dcrstakepool/system"
 )
 
@@ -20,35 +21,21 @@ import (
 // add a reference here, to the subsystemLoggers map, and the useLogger
 // function.
 var (
-	backendLog     = seelog.Disabled
-	controllersLog = btclog.Disabled
-	log            = btclog.Disabled
-	modelsLog      = btclog.Disabled
-	systemLog      = btclog.Disabled
+	backendLog          = seelog.Disabled
+	controllersLog      = btclog.Disabled
+	log                 = btclog.Disabled
+	modelsLog           = btclog.Disabled
+	stakepooldclientLog = btclog.Disabled
+	systemLog           = btclog.Disabled
 )
 
 // subsystemLoggers maps each subsystem identifier to its associated logger.
 var subsystemLoggers = map[string]btclog.Logger{
 	"DCRS": log,
 	"CNTL": controllersLog,
+	"GRPC": stakepooldclientLog,
 	"MODL": modelsLog,
 	"SYTM": systemLog,
-}
-
-// logClosure is used to provide a closure over expensive logging operations
-// so don't have to be performed when the logging level doesn't warrant it.
-type logClosure func() string
-
-// String invokes the underlying function and returns the result.
-func (c logClosure) String() string {
-	return c()
-}
-
-// newLogClosure returns a new closure over a function that returns a string
-// which itself provides a Stringer interface so that it can be used with the
-// logging system.
-func newLogClosure(c func() string) logClosure {
-	return logClosure(c)
 }
 
 // useLogger updates the logger references for subsystemID to logger.  Invalid
@@ -65,6 +52,9 @@ func useLogger(subsystemID string, logger btclog.Logger) {
 	case "CNTL":
 		controllersLog = logger
 		controllers.UseLogger(logger)
+	case "GRPC":
+		stakepooldclientLog = logger
+		stakepooldclient.UseLogger(logger)
 	case "MODL":
 		modelsLog = logger
 		models.UseLogger(logger)
@@ -132,11 +122,4 @@ func setLogLevels(logLevel string) {
 	for subsystemID := range subsystemLoggers {
 		setLogLevel(subsystemID, logLevel)
 	}
-}
-
-// fatalf logs a string, then cleanly exits.
-func fatalf(str string) {
-	log.Errorf("Unable to create profiler: %v", str)
-	backendLog.Flush()
-	os.Exit(1)
 }

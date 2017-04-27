@@ -4,9 +4,9 @@ import (
 	"bytes"
 	"html/template"
 
+	"github.com/go-gorp/gorp"
 	"github.com/gorilla/sessions"
 	"github.com/zenazn/goji/web"
-	"gopkg.in/gorp.v1"
 )
 
 type Controller struct {
@@ -30,6 +30,9 @@ func (controller *Controller) IsXhr(c web.C) bool {
 
 func (controller *Controller) Parse(t *template.Template, name string, data interface{}) string {
 	var doc bytes.Buffer
-	t.ExecuteTemplate(&doc, name, data)
+	err := t.ExecuteTemplate(&doc, name, data)
+	if err != nil {
+		log.Warnf("ExecuteTemplate error: %v", err)
+	}
 	return doc.String()
 }

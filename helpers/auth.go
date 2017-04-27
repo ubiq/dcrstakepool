@@ -2,8 +2,8 @@ package helpers
 
 import (
 	"github.com/decred/dcrstakepool/models"
+	"github.com/go-gorp/gorp"
 	"golang.org/x/crypto/bcrypt"
-	"gopkg.in/gorp.v1"
 )
 
 func AddPasswordResetToken(dbMap *gorp.DbMap, email string) (*models.User, error) {
@@ -31,11 +31,7 @@ func EmailChangeComplete(dbMap *gorp.DbMap, token string) error {
 	}
 
 	_, err = dbMap.Exec("DELETE FROM EmailChange WHERE Token = ?", token)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return err
 }
 
 func EmailChangeTokenExists(dbMap *gorp.DbMap, token string) (*models.EmailChange, error) {
@@ -111,6 +107,40 @@ func UpdateUserPasswordById(dbMap *gorp.DbMap, id int64, password []byte) (*mode
 	}
 
 	user.Password = password
+
+	_, err = dbMap.Update(&user)
+	if err != nil {
+		return nil, err
+	}
+
+	return &user, err
+}
+
+func UpdateVoteBitsByID(dbMap *gorp.DbMap, id int64, voteBits uint16) (*models.User, error) {
+	var user models.User
+	err := dbMap.SelectOne(&user, "SELECT * FROM Users WHERE UserId = ?", id)
+	if err != nil {
+		return nil, err
+	}
+
+	user.VoteBits = int64(voteBits)
+
+	_, err = dbMap.Update(&user)
+	if err != nil {
+		return nil, err
+	}
+
+	return &user, err
+}
+
+func UpdateVoteBitsVersionByID(dbMap *gorp.DbMap, id int64, voteVersion uint32) (*models.User, error) {
+	var user models.User
+	err := dbMap.SelectOne(&user, "SELECT * FROM Users WHERE UserId = ?", id)
+	if err != nil {
+		return nil, err
+	}
+
+	user.VoteBitsVersion = int64(voteVersion)
 
 	_, err = dbMap.Update(&user)
 	if err != nil {

@@ -11,11 +11,12 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/decred/dcrstakepool/codes"
 	"github.com/decred/dcrstakepool/models"
+	"github.com/go-gorp/gorp"
 	"github.com/gorilla/sessions"
 	"github.com/zenazn/goji/web"
-	"gopkg.in/gorp.v1"
+
+	"google.golang.org/grpc/codes"
 )
 
 // CSRF token constants
@@ -86,19 +87,31 @@ func (application *Application) LoadTemplates(templatePath string) error {
 	var templates []string
 
 	fn := func(path string, f os.FileInfo, err error) error {
-		if f.IsDir() != true && strings.HasSuffix(f.Name(), ".html") {
+		// If path doesn't exist, or other error with path, return error so that
+		// Walk will quit and return the error to the caller.
+		if err != nil {
+			return err
+		}
+		if !f.IsDir() && strings.HasSuffix(f.Name(), ".html") {
 			templates = append(templates, path)
 		}
 		return nil
 	}
 
 	err := filepath.Walk(templatePath, fn)
-
 	if err != nil {
 		return err
 	}
 
-	application.Template = template.Must(template.ParseFiles(templates...))
+	// Since template.Must panics with non-nil error, it is much more
+	// informative to pass the error to the caller (runMain) to log it and exit
+	// gracefully.
+	httpTemplates, err := template.ParseFiles(templates...)
+	if err != nil {
+		return err
+	}
+
+	application.Template = template.Must(httpTemplates, nil)
 	application.TemplatesPath = templatePath
 	return nil
 }

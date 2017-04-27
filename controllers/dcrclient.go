@@ -11,13 +11,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/decred/dcrd/blockchain/stake"
 	"github.com/decred/dcrd/chaincfg/chainhash"
 	"github.com/decred/dcrd/dcrjson"
 	"github.com/decred/dcrrpcclient"
 	"github.com/decred/dcrstakepool/models"
 	"github.com/decred/dcrutil"
-	"github.com/decred/dcrwallet/waddrmgr"
+	"github.com/decred/dcrwallet/wallet/udb"
 )
 
 // functionName
@@ -29,10 +28,6 @@ const (
 	createMultisigFn
 	importScriptFn
 	ticketsForAddressFn
-	getTicketVoteBitsFn
-	getTicketsVoteBitsFn
-	setTicketVoteBitsFn
-	setTicketsVoteBitsFn
 	getTxOutFn
 	getStakeInfoFn
 	connectedFn
@@ -51,19 +46,9 @@ var (
 	// instead of returning cached ticket information.
 	cacheTimerGetTickets = 20 * time.Second
 
-	// allowTimerSetVoteBits is the cooldown timer between set vote
-	// bits calls for some given ticket. After this time, the vote
-	// bits may be set again.
-	allowTimerSetVoteBits = 30 * time.Second
-
 	// defaultAccountName is the account name for the default wallet
 	// account as a string.
 	defaultAccountName = "default"
-)
-
-var (
-	ErrSetVoteBitsCoolDown = fmt.Errorf("Cannot set the vote bits because " +
-		"last call was too recent.")
 )
 
 // getNewAddressResponse
@@ -124,54 +109,6 @@ type ticketsForAddressResponse struct {
 type ticketsForAddressMsg struct {
 	address dcrutil.Address
 	reply   chan ticketsForAddressResponse
-}
-
-// getTicketVoteBitsResponse
-type getTicketVoteBitsResponse struct {
-	voteBits *dcrjson.GetTicketVoteBitsResult
-	err      error
-}
-
-// getTicketVoteBitsMsg
-type getTicketVoteBitsMsg struct {
-	hash  *chainhash.Hash
-	reply chan getTicketVoteBitsResponse
-}
-
-// getTicketsVoteBitsResponse
-type getTicketsVoteBitsResponse struct {
-	voteBitsList *dcrjson.GetTicketsVoteBitsResult
-	err          error
-}
-
-// getTicketsVoteBitsMsg
-type getTicketsVoteBitsMsg struct {
-	hashes []*chainhash.Hash
-	reply  chan getTicketsVoteBitsResponse
-}
-
-// setTicketVoteBitsResponse
-type setTicketVoteBitsResponse struct {
-	err error
-}
-
-// setTicketVoteBitsMsg
-type setTicketVoteBitsMsg struct {
-	hash     *chainhash.Hash
-	voteBits uint16
-	reply    chan setTicketVoteBitsResponse
-}
-
-// setTicketsVoteBitsResponse
-type setTicketsVoteBitsResponse struct {
-	err error
-}
-
-// setTicketsVoteBitsMsg
-type setTicketsVoteBitsMsg struct {
-	hashes    []*chainhash.Hash
-	votesBits []stake.VoteBits
-	reply     chan setTicketsVoteBitsResponse
 }
 
 // getTxOutResponse
@@ -243,13 +180,6 @@ func (w *walletSvrManager) walletRPCHandler() {
 out:
 	for {
 		select {
-		case setVoteBitsErr := <-w.setVoteBitsResyncChan:
-			if setVoteBitsErr != nil {
-				log.Error("Error syncing vote bits: ", setVoteBitsErr)
-			}
-		default:
-		}
-		select {
 		case m := <-w.msgChan:
 			switch msg := m.(type) {
 			case getNewAddressMsg:
@@ -271,22 +201,6 @@ out:
 			case ticketsForAddressMsg:
 				resp := w.executeInSequence(ticketsForAddressFn, msg)
 				respTyped := resp.(*ticketsForAddressResponse)
-				msg.reply <- *respTyped
-			case getTicketVoteBitsMsg:
-				resp := w.executeInSequence(getTicketVoteBitsFn, msg)
-				respTyped := resp.(*getTicketVoteBitsResponse)
-				msg.reply <- *respTyped
-			case getTicketsVoteBitsMsg:
-				resp := w.executeInSequence(getTicketsVoteBitsFn, msg)
-				respTyped := resp.(*getTicketsVoteBitsResponse)
-				msg.reply <- *respTyped
-			case setTicketVoteBitsMsg:
-				resp := w.executeInSequence(setTicketVoteBitsFn, msg)
-				respTyped := resp.(*setTicketVoteBitsResponse)
-				msg.reply <- *respTyped
-			case setTicketsVoteBitsMsg:
-				resp := w.executeInSequence(setTicketsVoteBitsFn, msg)
-				respTyped := resp.(*setTicketsVoteBitsResponse)
 				msg.reply <- *respTyped
 			case getTxOutMsg:
 				resp := w.executeInSequence(getTxOutFn, msg)
@@ -327,7 +241,7 @@ func (w *walletSvrManager) executeInSequence(fn functionName, msg interface{}) i
 	switch fn {
 	case getNewAddressFn:
 		resp := new(getNewAddressResponse)
-		addrs := make([]dcrutil.Address, w.serversLen, w.serversLen)
+		addrs := make([]dcrutil.Address, w.serversLen)
 		connectCount := 0
 		for i, s := range w.servers {
 			if w.servers[i] == nil {
@@ -382,8 +296,7 @@ func (w *walletSvrManager) executeInSequence(fn functionName, msg interface{}) i
 	case validateAddressFn:
 		vam := msg.(validateAddressMsg)
 		resp := new(validateAddressResponse)
-		vawrs := make([]*dcrjson.ValidateAddressWalletResult, w.serversLen,
-			w.serversLen)
+		vawrs := make([]*dcrjson.ValidateAddressWalletResult, w.serversLen)
 		connectCount := 0
 		for i, s := range w.servers {
 			if w.servers[i] == nil {
@@ -436,8 +349,7 @@ func (w *walletSvrManager) executeInSequence(fn functionName, msg interface{}) i
 	case createMultisigFn:
 		cmsm := msg.(createMultisigMsg)
 		resp := new(createMultisigResponse)
-		cmsrs := make([]*dcrjson.CreateMultiSigResult, w.serversLen,
-			w.serversLen)
+		cmsrs := make([]*dcrjson.CreateMultiSigResult, w.serversLen)
 		connectCount := 0
 		for i, s := range w.servers {
 			if w.servers[i] == nil {
@@ -490,7 +402,7 @@ func (w *walletSvrManager) executeInSequence(fn functionName, msg interface{}) i
 	case importScriptFn:
 		ism := msg.(importScriptMsg)
 		resp := new(importScriptResponse)
-		isErrors := make([]error, w.serversLen, w.serversLen)
+		isErrors := make([]error, w.serversLen)
 		for i, s := range w.servers {
 			if w.servers[i] == nil {
 				continue
@@ -529,8 +441,7 @@ func (w *walletSvrManager) executeInSequence(fn functionName, msg interface{}) i
 	case ticketsForAddressFn:
 		tfam := msg.(ticketsForAddressMsg)
 		resp := new(ticketsForAddressResponse)
-		tfars := make([]*dcrjson.TicketsForAddressResult, w.serversLen,
-			w.serversLen)
+		tfars := make([]*dcrjson.TicketsForAddressResult, w.serversLen)
 		connectCount := 0
 		for i, s := range w.servers {
 			if w.servers[i] == nil {
@@ -567,197 +478,10 @@ func (w *walletSvrManager) executeInSequence(fn functionName, msg interface{}) i
 		}
 		return resp
 
-	case getTicketVoteBitsFn:
-		gtvbm := msg.(getTicketVoteBitsMsg)
-		resp := new(getTicketVoteBitsResponse)
-		gtvbrs := make([]*dcrjson.GetTicketVoteBitsResult, w.serversLen,
-			w.serversLen)
-		connectCount := 0
-		for i, s := range w.servers {
-			if w.servers[i] == nil {
-				continue
-			}
-			gtvbr, err := s.GetTicketVoteBits(gtvbm.hash)
-			if err != nil && (err != dcrrpcclient.ErrClientDisconnect &&
-				err != dcrrpcclient.ErrClientShutdown) {
-				log.Infof("getTicketVoteBitsFn failure on server %v: %v", i, err)
-				resp.err = err
-				return resp
-			} else if err != nil && (err == dcrrpcclient.ErrClientDisconnect ||
-				err == dcrrpcclient.ErrClientShutdown) {
-				gtvbrs[i] = nil
-				continue
-			}
-			connectCount++
-			gtvbrs[i] = gtvbr
-		}
-
-		if connectCount < w.minServers {
-			log.Errorf("Unable to check any servers for getTicketVoteBitsFn")
-			resp.err = fmt.Errorf("not processing command; %v servers avail is below min of %v", connectCount, w.minServers)
-			return resp
-		}
-
-		for i := 0; i < w.serversLen; i++ {
-			if i == w.serversLen-1 {
-				break
-			}
-			if gtvbrs[i] == nil || gtvbrs[i+1] == nil {
-				continue
-			}
-			if gtvbrs[i].VoteBits != gtvbrs[i+1].VoteBits {
-				log.Infof("getTicketVoteBitsFn nonequiv failure on servers "+
-					"%v, %v", i, i+1)
-				resp.err = fmt.Errorf("non equivalent votebits returned")
-				return resp
-			}
-		}
-
-		for i := range gtvbrs {
-			if gtvbrs[i] != nil {
-				resp.voteBits = gtvbrs[i]
-				break
-			}
-		}
-		return resp
-
-	case getTicketsVoteBitsFn:
-		gtvbm := msg.(getTicketsVoteBitsMsg)
-		resp := new(getTicketsVoteBitsResponse)
-		gtvbrs := make([]*dcrjson.GetTicketsVoteBitsResult, w.serversLen,
-			w.serversLen)
-		connectCount := 0
-		for i, s := range w.servers {
-			if w.servers[i] == nil {
-				continue
-			}
-			gtvbr, err := s.GetTicketsVoteBits(gtvbm.hashes)
-			if err != nil && (err != dcrrpcclient.ErrClientDisconnect &&
-				err != dcrrpcclient.ErrClientShutdown) {
-				log.Infof("getTicketsVoteBitsFn failure on server %v: %v", i, err)
-				resp.err = err
-				return resp
-			} else if err != nil && (err == dcrrpcclient.ErrClientDisconnect ||
-				err == dcrrpcclient.ErrClientShutdown) {
-				gtvbrs[i] = nil
-				continue
-			}
-			connectCount++
-			gtvbrs[i] = gtvbr
-		}
-
-		if connectCount < w.minServers {
-			log.Errorf("Unable to check any servers for getTicketsVoteBitsFn")
-			resp.err = fmt.Errorf("not processing command; %v servers avail is below min of %v", connectCount, w.minServers)
-			return resp
-		}
-
-		for i := 0; i < w.serversLen; i++ {
-			if i == w.serversLen-1 {
-				break
-			}
-			if gtvbrs[i] == nil || gtvbrs[i+1] == nil {
-				continue
-			}
-			if len(gtvbrs[i].VoteBitsList) == 0 ||
-				len(gtvbrs[i+1].VoteBitsList) == 0 {
-				if len(gtvbrs[i].VoteBitsList) != len(gtvbrs[i+1].VoteBitsList) {
-					log.Infof("getTicketsVoteBitsFn nonequiv failure on servers "+
-						"%v, %v", i, i+1)
-					resp.err = fmt.Errorf("non equivalent num elements returned")
-					return resp
-				}
-				resp.voteBitsList = gtvbrs[0]
-				return resp
-			}
-			nonEquiv := false
-			for j := range gtvbrs[i].VoteBitsList {
-				if gtvbrs[i].VoteBitsList[j].VoteBits !=
-					gtvbrs[i+1].VoteBitsList[j].VoteBits {
-					log.Infof("getTicketsVoteBitsFn nonequiv failure on servers "+
-						"%v, %v", i, i+1)
-					log.Infof("votebits for server %v is %v, server %v is %v",
-						i, gtvbrs[i].VoteBitsList[j].VoteBits, i+1,
-						gtvbrs[i+1].VoteBitsList[j].VoteBits)
-					log.Infof("failing ticket hash: %v", gtvbm.hashes[j])
-					nonEquiv = true
-				}
-			}
-			if nonEquiv {
-				resp.err = fmt.Errorf("non equivalent votebits returned")
-				return resp
-			}
-		}
-
-		for i := range gtvbrs {
-			if gtvbrs[i] != nil {
-				resp.voteBitsList = gtvbrs[i]
-				break
-			}
-		}
-		return resp
-
-	case setTicketVoteBitsFn:
-		stvbm := msg.(setTicketVoteBitsMsg)
-		resp := new(setTicketVoteBitsResponse)
-		connectCount := 0
-		for i, s := range w.servers {
-			err := s.SetTicketVoteBits(stvbm.hash, stvbm.voteBits)
-			if err != nil && (err != dcrrpcclient.ErrClientDisconnect &&
-				err != dcrrpcclient.ErrClientShutdown) {
-				log.Infof("setTicketVoteBitsFn failure on server %v: %v", i, err)
-				resp.err = err
-				return resp
-			} else if err != nil && (err == dcrrpcclient.ErrClientDisconnect ||
-				err == dcrrpcclient.ErrClientShutdown) {
-				continue
-			}
-			connectCount++
-		}
-
-		if connectCount < w.minServers {
-			log.Errorf("Unable to check any servers for setTicketVoteBitsFn")
-			resp.err = fmt.Errorf("not processing command; %v servers avail is below min of %v",
-				connectCount, w.minServers)
-			return resp
-		}
-
-		return resp
-
-	// Handle multiple tickets at once
-	case setTicketsVoteBitsFn:
-		stvbm := msg.(setTicketsVoteBitsMsg)
-		resp := new(setTicketsVoteBitsResponse)
-
-		connectCount := 0
-		for i, s := range w.servers {
-			err := s.SetTicketsVoteBits(stvbm.hashes, stvbm.votesBits)
-			if err != nil && (err != dcrrpcclient.ErrClientDisconnect &&
-				err != dcrrpcclient.ErrClientShutdown) {
-				log.Infof("setTicketsVoteBitsFn failure on server %v: %v", i, err)
-				resp.err = err
-				return resp
-			} else if err != nil && (err == dcrrpcclient.ErrClientDisconnect ||
-				err == dcrrpcclient.ErrClientShutdown) {
-				continue
-			}
-			connectCount++
-		}
-
-		if connectCount < w.minServers {
-			log.Errorf("Unable to check any servers for setTicketsVoteBitsFn")
-			resp.err = fmt.Errorf("not processing command; %v servers avail is below min of %v",
-				connectCount, w.minServers)
-			return resp
-		}
-
-		return resp
-
 	case getTxOutFn:
 		gtom := msg.(getTxOutMsg)
 		resp := new(getTxOutResponse)
-		gtors := make([]*dcrjson.GetTxOutResult, w.serversLen,
-			w.serversLen)
+		gtors := make([]*dcrjson.GetTxOutResult, w.serversLen)
 		connectCount := 0
 		for i, s := range w.servers {
 			if w.servers[i] == nil {
@@ -809,8 +533,7 @@ func (w *walletSvrManager) executeInSequence(fn functionName, msg interface{}) i
 
 	case getStakeInfoFn:
 		resp := new(getStakeInfoResponse)
-		gsirs := make([]*dcrjson.GetStakeInfoResult, w.serversLen,
-			w.serversLen)
+		gsirs := make([]*dcrjson.GetStakeInfoResult, w.serversLen)
 		connectCount := 0
 		for i, s := range w.servers {
 			if w.servers[i] == nil {
@@ -865,7 +588,7 @@ func (w *walletSvrManager) executeInSequence(fn functionName, msg interface{}) i
 	case connectedFn:
 		resp := new(connectedResponse)
 		resp.err = nil
-		wirs := make([]*dcrjson.WalletInfoResult, w.serversLen, w.serversLen)
+		wirs := make([]*dcrjson.WalletInfoResult, w.serversLen)
 		resp.walletInfo = wirs
 		connectCount := 0
 		for i, s := range w.servers {
@@ -920,8 +643,7 @@ func (w *walletSvrManager) executeInSequence(fn functionName, msg interface{}) i
 	case stakePoolUserInfoFn:
 		spuim := msg.(stakePoolUserInfoMsg)
 		resp := new(stakePoolUserInfoResponse)
-		spuirs := make([]*dcrjson.StakePoolUserInfoResult, w.serversLen,
-			w.serversLen)
+		spuirs := make([]*dcrjson.StakePoolUserInfoResult, w.serversLen)
 		// use connectCount to increment total number of successful responses
 		// if we have > 0 then we proceed as though nothing is wrong for the user
 		connectCount := 0
@@ -1203,7 +925,7 @@ func (w *walletSvrManager) TicketsForAddress(address dcrutil.Address) (*dcrjson.
 	// If it isn't too old, return that instead.
 	cachedResp, ok := w.cachedGetTicketsMap[address.EncodeAddress()]
 	if ok {
-		if time.Now().Sub(cachedResp.timer) < cacheTimerGetTickets {
+		if time.Since(cachedResp.timer) < cacheTimerGetTickets {
 			return cachedResp.res, nil
 		}
 	}
@@ -1222,111 +944,6 @@ func (w *walletSvrManager) TicketsForAddress(address dcrutil.Address) (*dcrjson.
 	}
 
 	return response.tickets, response.err
-}
-
-// GetTicketVoteBits
-//
-// This can race depending on what wallet is currently processing, so failures
-// from this function should NOT cause fatal errors on the web server like the
-// other RPC client calls.
-func (w *walletSvrManager) GetTicketVoteBits(hash *chainhash.Hash) (*dcrjson.GetTicketVoteBitsResult, error) {
-	reply := make(chan getTicketVoteBitsResponse)
-	w.msgChan <- getTicketVoteBitsMsg{
-		hash:  hash,
-		reply: reply,
-	}
-	response := <-reply
-	return response.voteBits, response.err
-}
-
-// GetTicketsVoteBits
-//
-// This can race depending on what wallet is currently processing, so failures
-// from this function should NOT cause fatal errors on the web server like the
-// other RPC client calls.
-func (w *walletSvrManager) GetTicketsVoteBits(hashes []*chainhash.Hash) (*dcrjson.GetTicketsVoteBitsResult, error) {
-	reply := make(chan getTicketsVoteBitsResponse)
-	w.msgChan <- getTicketsVoteBitsMsg{
-		hashes: hashes,
-		reply:  reply,
-	}
-	response := <-reply
-	return response.voteBitsList, response.err
-}
-
-// SetTicketVoteBits
-//
-// This should return equivalent results from all wallet RPCs. If this
-// encounters a failure, it should be considered fatal.
-func (w *walletSvrManager) SetTicketVoteBits(hash *chainhash.Hash, voteBits uint16) error {
-	// Assert that all servers are online.
-	_, err := w.connected()
-	if err != nil {
-		return connectionError(err)
-	}
-
-	w.setVoteBitsCoolDownMutex.Lock()
-	defer w.setVoteBitsCoolDownMutex.Unlock()
-
-	// Throttle how often the user is allowed to change their stake
-	// vote bits.
-	vbSetTime, ok := w.setVoteBitsCoolDownMap[*hash]
-	if ok {
-		if time.Now().Sub(vbSetTime) < allowTimerSetVoteBits {
-			return ErrSetVoteBitsCoolDown
-		}
-	}
-
-	reply := make(chan setTicketVoteBitsResponse)
-	w.msgChan <- setTicketVoteBitsMsg{
-		hash:     hash,
-		voteBits: voteBits,
-		reply:    reply,
-	}
-
-	// If the set was successful, reset the timer.
-	w.setVoteBitsCoolDownMap[*hash] = time.Now()
-
-	response := <-reply
-	return response.err
-}
-
-// SetTicketsVoteBits
-//
-// This should return equivalent results from all wallet RPCs. If this
-// encounters a failure, it should be considered fatal.
-func (w *walletSvrManager) SetTicketsVoteBits(hashes []*chainhash.Hash, votesBits []stake.VoteBits) error {
-	// Assert that all servers are online.
-	_, err := w.connected()
-	if err != nil {
-		return connectionError(err)
-	}
-
-	w.setVoteBitsCoolDownMutex.Lock()
-	defer w.setVoteBitsCoolDownMutex.Unlock()
-
-	// Throttle how often the user is allowed to change their stake
-	// vote bits.
-	// TODO: handle this better
-	vbSetTime, ok := w.setVoteBitsCoolDownMap[*hashes[0]]
-	if ok {
-		if time.Now().Sub(vbSetTime) < allowTimerSetVoteBits {
-			return ErrSetVoteBitsCoolDown
-		}
-	}
-
-	reply := make(chan setTicketsVoteBitsResponse)
-	w.msgChan <- setTicketsVoteBitsMsg{
-		hashes:    hashes,
-		votesBits: votesBits,
-		reply:     reply,
-	}
-
-	// If the set was successful, reset the timer.
-	w.setVoteBitsCoolDownMap[*hashes[0]] = time.Now()
-
-	response := <-reply
-	return response.err
 }
 
 // GetTxOut gets a txOut status given a hash and an output index. It returns
@@ -1383,7 +1000,7 @@ func (w *walletSvrManager) GetBestBlock() (*chainhash.Hash, int64, error) {
 func (w *walletSvrManager) getStakeInfo() (*dcrjson.GetStakeInfoResult, error) {
 	// Less than five minutes has elapsed since the last call. Return
 	// the previously cached stake information.
-	if time.Now().Sub(w.cachedStakeInfoTimer) < cacheTimerStakeInfo {
+	if time.Since(w.cachedStakeInfoTimer) < cacheTimerStakeInfo {
 		return w.cachedStakeInfo, nil
 	}
 
@@ -1423,6 +1040,8 @@ type getTicketsCacheData struct {
 	timer time.Time
 }
 
+// NewGetTicketsCacheData is a contructor for getTicketsCacheData that sets the
+// last get time to now.
 func NewGetTicketsCacheData(tfar *dcrjson.TicketsForAddressResult) *getTicketsCacheData {
 	return &getTicketsCacheData{tfar, time.Now()}
 }
@@ -1456,16 +1075,8 @@ type walletSvrManager struct {
 	cachedGetTicketsMap   map[string]*getTicketsCacheData
 	cachedGetTicketsMutex sync.Mutex
 
-	// setVoteBitsCoolDownMap is a map that tracks the last calls to
-	// setting the votebits for a transaction. It applies a cooldown
-	// so that the RPC call isn't abused.
-	setVoteBitsCoolDownMap   map[chainhash.Hash]time.Time
-	setVoteBitsCoolDownMutex sync.Mutex
-
 	// minServers is the minimum number of servers required before alerting
 	minServers int
-
-	setVoteBitsResyncChan chan error
 
 	started  int32
 	shutdown int32
@@ -1524,9 +1135,6 @@ func (w *walletSvrManager) CheckServers() error {
 		if !wi.DaemonConnected {
 			return fmt.Errorf("Wallet on svr %d not connected\n", i)
 		}
-		if !wi.StakeMining {
-			return fmt.Errorf("Wallet on svr %d not stakemining.\n", i)
-		}
 		if !wi.Unlocked {
 			return fmt.Errorf("Wallet on svr %d not unlocked.\n", i)
 		}
@@ -1563,149 +1171,6 @@ func getMinedTickets(cl *dcrrpcclient.Client, th []*chainhash.Hash) []*chainhash
 	return ticketHashesMined
 }
 
-// SyncVoteBits ensures that the wallet servers are all in sync with each
-// other in terms of vote bits.  Call on creation.
-func (w *walletSvrManager) SyncVoteBits() error {
-	// Check for connectivity and if unlocked.
-	err := w.CheckServers()
-	if err != nil {
-		return err
-	}
-
-	// Check live tickets
-	log.Info("SyncVoteBits: Getting list of all live tickets on wallet 0.")
-	// legacyrpc.getTickets excludes spent tickets
-	ticketHashes, err := w.servers[0].GetTickets(true)
-	if err != nil {
-		return err
-	}
-	ticketHashesMined := getMinedTickets(w.servers[0], ticketHashes)
-	numLiveTickets := len(ticketHashesMined)
-	log.Infof("SyncVoteBits: Excluding %d unmined tickets in votebits sync.",
-		len(ticketHashes)-numLiveTickets)
-
-	// gsi, err := w.servers[0].GetStakeInfo()
-	// if err != nil {
-	// 	return err
-	// }
-	// if int(gsi.Live+gsi.Immature) != numLiveTickets {
-	// 	return fmt.Errorf("Number of live tickets inconsistent: %v, %v",
-	// 		gsi.Live+gsi.Immature, numLiveTickets)
-	// }
-
-	// Check number of live tickets on other servers
-	for i, cl := range w.servers {
-		if i == 0 {
-			continue
-		}
-
-		log.Infof("SyncVoteBits: Checking number of tickets on wallet %d", i)
-		gsi, err := cl.GetStakeInfo()
-		if err != nil {
-			return err
-		}
-
-		if numLiveTickets != int(gsi.Live+gsi.Immature) {
-			log.Errorf("Non-equivalent number of tickets on servers %v, %v "+
-				" (%v, %v)", 0, i, numLiveTickets, int(gsi.Live))
-			return fmt.Errorf("non equivalent num elements returned")
-		}
-	}
-
-	return w.SyncTicketsVoteBits(ticketHashesMined)
-}
-
-// SyncTicketsVoteBits ensures that the wallet servers are all in sync with each
-// other in terms of vote bits of the given tickets.  First wallet rules.
-func (w *walletSvrManager) SyncTicketsVoteBits(tickets []*chainhash.Hash) error {
-	if len(tickets) == 0 {
-		return nil
-	}
-
-	// Check for connectivity and if unlocked.
-	err := w.CheckServers()
-	if err != nil {
-		return err
-	}
-
-	// Get a write lock, allowing other get functions to complete
-	w.ticketDataLock.Lock()
-	defer w.ticketDataLock.Unlock()
-
-	// Set a flag so other operations, like the web endpoint handlers, do not
-	// have to block. Tickets POST handler also writes.
-	if !atomic.CompareAndSwapInt32(&w.ticketDataBlocker, 0, 1) {
-		return fmt.Errorf("SyncTicketsVoteBits already taking place.")
-	}
-	defer atomic.StoreInt32(&w.ticketDataBlocker, 0)
-
-	log.Infof("Beginning resync of vote bits for %d tickets.", len(tickets))
-
-	// Go through each server, get ticket vote bits
-	votebitsPerServer := make([]map[chainhash.Hash]uint16, w.serversLen)
-
-	for i, cl := range w.servers {
-		votebitsPerServer[i] = make(map[chainhash.Hash]uint16)
-
-		votebits, err := cl.GetTicketsVoteBits(tickets)
-		if err != nil {
-			return fmt.Errorf("GetTicketsVoteBits failed: %v", err)
-		}
-
-		vbl := votebits.VoteBitsList
-		// numTickets :=  len(vbl)
-
-		for ih, hash := range tickets {
-			votebitsPerServer[i][*hash] = vbl[ih].VoteBits
-		}
-	}
-
-	// Synchronize, using first server's bits if different
-	// NOTE: This does not check for missing tickets.
-	masterVotebitsMap := votebitsPerServer[0]
-	for i, votebitsMap := range votebitsPerServer {
-		if i == 0 {
-			continue
-		}
-
-		for hash, votebits := range votebitsMap {
-			refVoteBits, ok := masterVotebitsMap[hash]
-			if !ok {
-				return fmt.Errorf("Ticket not present on all RPC servers: %v",
-					hash)
-			}
-			if votebits != refVoteBits {
-				log.Infof("Setting ticket %v votebits to %v on wallet %v",
-					hash.String(), refVoteBits, i)
-				err := w.servers[i].SetTicketVoteBits(&hash, refVoteBits)
-				if err != nil {
-					return err
-				}
-			}
-		}
-	}
-
-	log.Infof("Completed resync of vote bits for %d tickets.", len(tickets))
-
-	return nil
-}
-
-func (w *walletSvrManager) SyncUserVoteBits(userMultiSigAddress dcrutil.Address) error {
-	// Check for connectivity and if unlocked.
-	err := w.CheckServers()
-	if err != nil {
-		return err
-	}
-
-	// Get all live tickets for user
-	ticketHashes, err := w.GetUnspentUserTickets(userMultiSigAddress)
-	if err != nil {
-		return err
-	}
-
-	return w.SyncTicketsVoteBits(ticketHashes)
-}
-
 // GetUnspentUserTickets gets live and immature tickets for a stakepool user
 func (w *walletSvrManager) GetUnspentUserTickets(userMultiSigAddress dcrutil.Address) ([]*chainhash.Hash, error) {
 	// live tickets only
@@ -1738,6 +1203,15 @@ func (w *walletSvrManager) WalletStatus() ([]*dcrjson.WalletInfoResult, error) {
 	return w.connected()
 }
 
+func getWalletVoteVersion(client *dcrrpcclient.Client) (uint32, error) {
+	wi, err := client.WalletInfo()
+	if err != nil {
+		return 0, err
+	}
+
+	return wi.VoteVersion, nil
+}
+
 // checkIfWalletConnected checks to see if the passed wallet's client is connected
 // and if the wallet is unlocked.
 func checkIfWalletConnected(client *dcrrpcclient.Client) error {
@@ -1747,9 +1221,6 @@ func checkIfWalletConnected(client *dcrrpcclient.Client) error {
 	}
 	if !wi.DaemonConnected {
 		return fmt.Errorf("wallet not connected")
-	}
-	if !wi.StakeMining {
-		return fmt.Errorf("wallet not stakemining")
 	}
 	if !wi.Unlocked {
 		return fmt.Errorf("wallet not unlocked")
@@ -1785,6 +1256,47 @@ func (w *walletSvrManager) fetchTransaction(txHash *chainhash.Hash) (*dcrutil.Tx
 	return tx, nil
 }
 
+// checkWalletsVoteVersion returns a consistent vote version between all wallets
+// or an error indicating a mismatch
+func checkWalletsVoteVersion(wsm *walletSvrManager) (uint32, error) {
+	defaultVoteVersion := uint32(0)
+	walletVoteVersions := make(map[int]uint32)
+
+	// grab Vote Version from all wallets
+	for i := range wsm.servers {
+		if wsm.servers[i] == nil {
+			continue
+		}
+
+		wvv, err := getWalletVoteVersion(wsm.servers[i])
+		if err != nil {
+			return defaultVoteVersion, err
+		}
+		walletVoteVersions[i] = wvv
+	}
+
+	// ensure Vote Version matches on all wallets
+	lastVersion := uint32(0)
+	lastServer := 0
+	firstrun := true
+	for k, v := range walletVoteVersions {
+		if firstrun {
+			firstrun = false
+			lastVersion = v
+		}
+
+		if v != lastVersion {
+			vErr := fmt.Errorf("wallets %d and %d have mismatched vote versions",
+				k, lastServer)
+			return defaultVoteVersion, vErr
+		}
+
+		lastServer = k
+	}
+
+	return lastVersion, nil
+}
+
 // walletSvrsSync ensures that the wallet servers are all in sync with each
 // other in terms of redeemscripts and address indexes.
 func walletSvrsSync(wsm *walletSvrManager, multiSigScripts []models.User) error {
@@ -1809,12 +1321,20 @@ func walletSvrsSync(wsm *walletSvrManager, multiSigScripts []models.User) error 
 		Height int
 	}
 
-	// Fetch the address indexes and redeem scripts from
-	// each server.
-	addrIdxExts := make([]int, wsm.serversLen)
-	var bestAddrIdxExt int
-	addrIdxInts := make([]int, wsm.serversLen)
-	var bestAddrIdxInt int
+	for i := range wsm.servers {
+		if wsm.servers[i] == nil {
+			continue
+		}
+		// Set watched address index to MaxUsers so all generated ticket
+		// addresses show as 'ismine'.
+		err := wsm.servers[i].AccountSyncAddressIndex(defaultAccountName,
+			udb.ExternalBranch, MaxUsers)
+		if err != nil {
+			return err
+		}
+	}
+
+	// Fetch the redeem scripts from each server.
 	redeemScriptsPerServer := make([]map[chainhash.Hash]*ScriptHeight,
 		wsm.serversLen)
 	allRedeemScripts := make(map[chainhash.Hash]*ScriptHeight)
@@ -1828,35 +1348,15 @@ func walletSvrsSync(wsm *walletSvrManager, multiSigScripts []models.User) error 
 		}
 		allRedeemScripts[chainhash.HashH(byteScript)] = &ScriptHeight{byteScript, int(v.HeightRegistered)}
 	}
-	// Go through each server and see who is synced to the longest
-	// address indexes and and the most redeemscripts.
-	log.Info("Getting address index and importscript information from wallets.")
+	// Go through each server and see who is synced to the most redeemscripts.
+	log.Info("Getting importscript information from wallets")
 	for i := range wsm.servers {
 		if wsm.servers[i] == nil {
 			continue
 		}
-		addrIdxExt, err := wsm.servers[i].AccountAddressIndex("default",
-			waddrmgr.ExternalBranch)
-		if err != nil {
-			return err
-		}
-		addrIdxInt, err := wsm.servers[i].AccountAddressIndex("default",
-			waddrmgr.InternalBranch)
-		if err != nil {
-			return err
-		}
 		redeemScripts, err := wsm.servers[i].ListScripts()
 		if err != nil {
 			return err
-		}
-
-		addrIdxExts[i] = addrIdxExt
-		addrIdxInts[i] = addrIdxInt
-		if addrIdxExt > bestAddrIdxExt {
-			bestAddrIdxExt = addrIdxExt
-		}
-		if addrIdxInt > bestAddrIdxInt {
-			bestAddrIdxInt = addrIdxInt
 		}
 
 		redeemScriptsPerServer[i] = make(map[chainhash.Hash]*ScriptHeight)
@@ -1872,30 +1372,11 @@ func walletSvrsSync(wsm *walletSvrManager, multiSigScripts []models.User) error 
 	// Synchronize the address indexes if needed, then synchronize the
 	// redeemscripts. Ignore the errors when importing scripts and
 	// assume it'll just skip reimportation if it already has it.
-	log.Info("Syncing wallets' redeem scripts and setting address indexes.")
+	log.Info("Syncing wallets' redeem scripts")
 	desynced := false
 	for i := range wsm.servers {
 		if wsm.servers[i] == nil {
 			continue
-		}
-		// Sync address indexes.
-		if addrIdxExts[i] < bestAddrIdxExt {
-			err := wsm.servers[i].AccountSyncAddressIndex(defaultAccountName,
-				waddrmgr.ExternalBranch, bestAddrIdxExt)
-			if err != nil {
-				return err
-			}
-			log.Infof("Expected external address index for wallet %v is desynced. Got %v Want %v", i, addrIdxExts[i], bestAddrIdxExt)
-			desynced = true
-		}
-		if addrIdxInts[i] < bestAddrIdxInt {
-			err := wsm.servers[i].AccountSyncAddressIndex(defaultAccountName,
-				waddrmgr.InternalBranch, bestAddrIdxInt)
-			if err != nil {
-				return err
-			}
-			log.Infof("Expected internal address index for wallet %v is desynced. Got %v Want %v", i, addrIdxInts[i], bestAddrIdxInt)
-			desynced = true
 		}
 
 		// Sync redeemscripts.
@@ -1912,9 +1393,11 @@ func walletSvrsSync(wsm *walletSvrManager, multiSigScripts []models.User) error 
 		}
 	}
 
-	// If we had to sync the address indexes, we might be missing
-	// some tickets. Scan for the tickets now and try to import any
-	// that another wallet may be missing.
+	// If we had to sync then we might be missing some tickets.
+	// Scan for the tickets now and try to import any that another wallet may
+	// be missing.
+	// TODO we should block until the rescans triggered by importing the scripts
+	// have been completed.
 	if desynced {
 		log.Infof("desynced had been detected, now attempting to " +
 			"resync all tickets acrosss each wallet.")
@@ -1947,10 +1430,10 @@ func walletSvrsSync(wsm *walletSvrManager, multiSigScripts []models.User) error 
 			if wsm.servers[i] == nil {
 				continue
 			}
-			for ticketHash, _ := range allTickets {
+			for ticketHash := range allTickets {
 				_, ok := ticketsPerServer[i][ticketHash]
 				if !ok {
-					h := chainhash.Hash(ticketHash)
+					h := ticketHash
 					log.Infof("wallet %v: is missing ticket %v", i, h)
 					tx, err := wsm.fetchTransaction(&h)
 					if err != nil {
@@ -2015,7 +1498,7 @@ func newWalletSvrManager(walletHosts []string, walletCerts []string,
 	walletUsers []string, walletPasswords []string, minServers int) (*walletSvrManager, error) {
 
 	var err error
-	localServers := make([]*dcrrpcclient.Client, len(walletHosts), len(walletHosts))
+	localServers := make([]*dcrrpcclient.Client, len(walletHosts))
 	for i := range walletHosts {
 		localServers[i], err = connectWalletRPC(walletHosts[i], walletCerts[i], walletUsers[i], walletPasswords[i])
 		if err != nil {
@@ -2025,19 +1508,17 @@ func newWalletSvrManager(walletHosts []string, walletCerts []string,
 	}
 
 	wsm := walletSvrManager{
-		walletHosts:            walletHosts,
-		walletCerts:            walletCerts,
-		walletUsers:            walletUsers,
-		walletPasswords:        walletPasswords,
-		servers:                localServers,
-		serversLen:             len(localServers),
-		cachedStakeInfoTimer:   time.Now().Add(-cacheTimerStakeInfo),
-		cachedGetTicketsMap:    make(map[string]*getTicketsCacheData),
-		setVoteBitsCoolDownMap: make(map[chainhash.Hash]time.Time),
-		setVoteBitsResyncChan:  make(chan error, 500),
-		msgChan:                make(chan interface{}, 500),
-		quit:                   make(chan struct{}),
-		minServers:             minServers,
+		walletHosts:          walletHosts,
+		walletCerts:          walletCerts,
+		walletUsers:          walletUsers,
+		walletPasswords:      walletPasswords,
+		servers:              localServers,
+		serversLen:           len(localServers),
+		cachedStakeInfoTimer: time.Now().Add(-cacheTimerStakeInfo),
+		cachedGetTicketsMap:  make(map[string]*getTicketsCacheData),
+		msgChan:              make(chan interface{}, 500),
+		quit:                 make(chan struct{}),
+		minServers:           minServers,
 	}
 
 	return &wsm, nil

@@ -6,9 +6,9 @@ import (
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
+	"github.com/go-gorp/gorp"
 	_ "github.com/go-sql-driver/mysql"
 	"golang.org/x/crypto/bcrypt"
-	"gopkg.in/gorp.v1"
 )
 
 type EmailChange struct {
@@ -42,6 +42,8 @@ type User struct {
 	EmailVerified    int64
 	EmailToken       string
 	APIToken         string
+	VoteBits         int64
+	VoteBitsVersion  int64
 }
 
 func (user *User) HashPassword(password string) {
@@ -62,13 +64,14 @@ func GetUserByEmail(dbMap *gorp.DbMap, email string) (user *User) {
 	return
 }
 
-func GetUserById(dbMap *gorp.DbMap, id int64) (user *User) {
-	err := dbMap.SelectOne(&user, "SELECT * FROM Users WHERE UserId = ?", id)
+func GetUserById(dbMap *gorp.DbMap, id int64) (user *User, err error) {
+	err = dbMap.SelectOne(&user, "SELECT * FROM Users WHERE UserId = ?", id)
 
 	if err != nil {
-		log.Warnf("Can't get user by id: %v", err)
+		return nil, err
 	}
-	return
+
+	return user, nil
 }
 
 // GetUserCount gives a count of all users
@@ -79,6 +82,16 @@ func GetUserCount(dbMap *gorp.DbMap) int64 {
 	}
 
 	return userCount
+}
+
+// GetUserMax gives the last userid
+func GetUserMax(dbMap *gorp.DbMap) int64 {
+	maxUserID, err := dbMap.SelectInt("SELECT MAX(Userid) FROM Users")
+	if err != nil {
+		return int64(0)
+	}
+
+	return maxUserID
 }
 
 // GetUserCountActive gives a count of all users who have submitted an address
@@ -177,7 +190,17 @@ func GetDbMap(APISecret, baseURL, user, password, hostname, port, database strin
 	// use whatever database/sql driver you wish
 	//TODO: Get user, password and database from config.
 	db, err := sql.Open("mysql", fmt.Sprint(user, ":", password, "@(", hostname, ":", port, ")/", database, "?charset=utf8mb4"))
-	checkErr(err, "sql.Open failed")
+	if err != nil {
+		log.Critical("sql.Open failed: ", err)
+		return nil
+	}
+
+	// sql.Open just validates its arguments without creating a connection
+	// Verify that the data source name is valid with Ping:
+	if err = db.Ping(); err != nil {
+		log.Critical("Unable to establish connection to database: ", err)
+		return nil
+	}
 
 	// construct a gorp DbMap
 	dbMap := &gorp.DbMap{Db: db, Dialect: gorp.MySQLDialect{Engine: "InnoDB", Encoding: "UTF8MB4"}}
@@ -185,13 +208,18 @@ func GetDbMap(APISecret, baseURL, user, password, hostname, port, database strin
 	// add a table, setting the table name and specifying that
 	// the Id property is an auto incrementing primary key
 	dbMap.AddTableWithName(EmailChange{}, "EmailChange").SetKeys(true, "Id")
-	dbMap.AddTableWithName(User{}, "Users").SetKeys(true, "Id")
 	dbMap.AddTableWithName(PasswordReset{}, "PasswordReset").SetKeys(true, "Id")
+	dbMap.AddTableWithName(User{}, "Users").SetKeys(true, "Id")
 
 	// create the table. in a production system you'd generally
 	// use a migration tool, or create the tables via scripts
 	err = dbMap.CreateTablesIfNotExists()
-	checkErr(err, "Create tables failed")
+	if err != nil {
+		log.Critical("Create tables failed: ", err)
+		// There is no point proceeding, so return. TODO: signal to caller the
+		// error, or possibly close the db, or panic.
+		return dbMap
+	}
 
 	// The ORM, Gorp, doesn't support migrations so we just add new columns
 	// that weren't present in the original schema so admins can upgrade
@@ -213,7 +241,10 @@ func GetDbMap(APISecret, baseURL, user, password, hostname, port, database strin
 	// bug fix for previous -- users who hadn't submitted a script won't be
 	// able to login because Gorp can't handle NULL values
 	_, err = dbMap.Exec("UPDATE Users SET HeightRegistered = 0 WHERE HeightRegistered IS NULL")
-	checkErr(err, "setting HeightRegistered to 0 failed")
+	if err != nil {
+		log.Error("Setting HeightRegistered to 0 failed ", err)
+		// Do not return since db is opened and other statements may work
+	}
 
 	// add EmailVerified, EmailToken so new users' email addresses can be
 	// verified.  We consider users who already registered to be grandfathered
@@ -237,13 +268,29 @@ func GetDbMap(APISecret, baseURL, user, password, hostname, port, database strin
 	// and do not have an API Token already set.
 	var users []User
 	_, err = dbMap.Select(&users, "SELECT * FROM Users WHERE APIToken = '' AND EmailVerified > 0")
-	checkErr(err, "Select failed")
+	if err != nil {
+		log.Critical("Select verified users failed: ", err)
+		// With out a Valid []Users, we cannot proceed
+		return dbMap
+	}
+
 	for _, u := range users {
 		err := SetUserAPIToken(dbMap, APISecret, baseURL, u.Id)
 		if err != nil {
-			log.Criticalf("unable to set API Token for UserId %v: %v", u.Id, err)
+			log.Errorf("Unable to set API Token for UserId %v: %v", u.Id, err)
 		}
 	}
+
+	// stakepool v1.0.0 -> v1.1.0
+
+	// add VoteBits column for storing the user's voting preferences.  Set the
+	// default to 1 which means the previous block was valid
+	addColumn(dbMap, database, "Users", "VoteBits", "bigint(20) NULL", "APIToken", "UPDATE Users SET VoteBits = 1")
+
+	// add VoteBitsVersion column for storing the vote version that the VoteBits
+	// are set for.  The default is 3 since that is the current version on mainnet
+	// and it will be upgraded when talking to stakepoold
+	addColumn(dbMap, database, "Users", "VoteBitsVersion", "bigint(20) NULL", "VoteBits", "UPDATE Users SET VoteBitsVersion = 3")
 
 	return dbMap
 }
