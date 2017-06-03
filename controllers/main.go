@@ -11,7 +11,6 @@ import (
 	"net/smtp"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/decred/dcrd/chaincfg"
@@ -268,23 +267,24 @@ func (controller *MainController) APIAddress(c web.C, r *http.Request) ([]string
 		return nil, codes.InvalidArgument, "address error", errors.New("incorrect address type")
 	}
 
-	if controller.RPCIsStopped() {
-		return nil, codes.Unavailable, "system error", errors.New("unable to process wallet commands")
-	}
-	pooladdress, err := controller.rpcServers.GetNewAddress()
+	// Get the ticket address for this user
+	pooladdress, err := controller.TicketAddressForUserID(int(c.Env["APIUserID"].(int64)))
 	if err != nil {
-		controller.handlePotentialFatalError("GetNewAddress", err)
+		log.Errorf("unable to derive ticket address: %v", err)
 		return nil, codes.Unavailable, "system error", errors.New("unable to process wallet commands")
 	}
 
-	if controller.RPCIsStopped() {
-		return nil, codes.Unavailable, "system error", errors.New("unable to process wallet commands")
-	}
 	poolValidateAddress, err := controller.rpcServers.ValidateAddress(pooladdress)
 	if err != nil {
-		controller.handlePotentialFatalError("ValidateAddress pooladdress", err)
+		log.Errorf("unable to validate address: %v", err)
 		return nil, codes.Unavailable, "system error", errors.New("unable to process wallet commands")
 	}
+	if !poolValidateAddress.IsMine {
+		log.Errorf("unable to validate ismine for pool ticket address: %s",
+			pooladdress.String())
+		return nil, codes.Unavailable, "system error", errors.New("unable to process wallet commands")
+	}
+
 	poolPubKeyAddr := poolValidateAddress.PubKeyAddr
 
 	p, err := dcrutil.DecodeAddress(poolPubKeyAddr, controller.params)
@@ -741,7 +741,7 @@ func (controller *MainController) AddressPost(c web.C, r *http.Request) (string,
 	// Get the ticket address for this user
 	pooladdress, err := controller.TicketAddressForUserID(int(uid64))
 	if err != nil {
-		log.Errorf("unexpected error deriving ticket addr: %s", err.Error())
+		log.Errorf("unable to derive ticket address: %v", err)
 		session.AddFlash("Unable to derive ticket address", "address")
 		return controller.Address(c, r)
 	}
@@ -756,8 +756,8 @@ func (controller *MainController) AddressPost(c web.C, r *http.Request) (string,
 		return "/error", http.StatusSeeOther
 	}
 	if !poolValidateAddress.IsMine {
-		log.Errorf("unable to validate ismine for pool ticket addr: %s",
-			err.Error())
+		log.Errorf("unable to validate ismine for pool ticket address: %s",
+			pooladdress.String())
 		session.AddFlash("Unable to validate pool ticket address", "address")
 		return controller.Address(c, r)
 	}
@@ -1566,6 +1566,7 @@ func (controller *MainController) Status(c web.C, r *http.Request) (string, int)
 		Connected       bool
 		DaemonConnected bool
 		Unlocked        bool
+		EnableVoting    bool
 	}
 	walletPageInfo := make([]WalletInfoPage, len(walletInfo))
 	connectedWallets := 0
@@ -1587,6 +1588,7 @@ func (controller *MainController) Status(c web.C, r *http.Request) (string, int)
 		walletPageInfo[i] = WalletInfoPage{
 			Connected:       true,
 			DaemonConnected: v.DaemonConnected,
+			EnableVoting:    v.Voting,
 			Unlocked:        v.Unlocked,
 		}
 	}
@@ -1646,6 +1648,7 @@ func (controller *MainController) Tickets(c web.C, r *http.Request) (string, int
 
 	ticketInfoInvalid := map[int]TicketInfoInvalid{}
 	ticketInfoLive := map[int]TicketInfoLive{}
+	ticketInfoExpired := map[int]TicketInfoHistoric{}
 	ticketInfoMissed := map[int]TicketInfoHistoric{}
 	ticketInfoVoted := map[int]TicketInfoHistoric{}
 
@@ -1691,45 +1694,6 @@ func (controller *MainController) Tickets(c web.C, r *http.Request) (string, int
 	w := controller.rpcServers
 	// TODO: Tell the user if there is a cool-down
 
-	// Attempt a "TryLock" so the page won't block
-
-	// select {
-	// case <-w.ticketTryLock:
-	// 	w.ticketTryLock <- nil
-	// 	responseHeaderMap["Retry-After"] = "60"
-	// 	c.Env["Content"] = template.HTML("Ticket data resyncing.  Please try again later.")
-	// 	return controller.Parse(t, "main", c.Env), http.StatusProcessing
-	// default:
-	// }
-
-	if atomic.LoadInt32(&w.ticketDataBlocker) != 0 {
-		// with HTTP 102 we can specify an estimated time
-		responseHeaderMap["Retry-After"] = "60"
-		// Render page with messgae to try again later
-		//c.Env["Content"] = template.HTML("Ticket data resyncing.  Please try again later.")
-		session.AddFlash("Ticket data now resyncing. Please try again later.", "tickets-warning")
-		c.Env["FlashWarn"] = session.Flashes("tickets-warning")
-		c.Env["Content"] = template.HTML(controller.Parse(t, "tickets", c.Env))
-		return controller.Parse(t, "main", c.Env), http.StatusOK
-	}
-
-	// Vote bits sync is not running, but we also don't want a sync process
-	// starting. Note that the sync process locks this mutex before setting the
-	// atomic, so this shouldn't block.
-	w.ticketDataLock.RLock()
-	defer w.ticketDataLock.RUnlock()
-
-	widgets := controller.Parse(t, "tickets", c.Env)
-
-	// TODO: how could this happen?
-	if err != nil {
-		log.Info(err)
-		widgets = controller.Parse(t, "tickets", c.Env)
-		c.Env["Content"] = template.HTML(widgets)
-		return controller.Parse(t, "main", c.Env), http.StatusOK
-	}
-
-	// spui := new(dcrjson.StakePoolUserInfoResult)
 	spui, err := w.StakePoolUserInfo(multisig)
 	if err != nil {
 		// Render page with message to try again later
@@ -1747,6 +1711,12 @@ func (controller *MainController) Tickets(c web.C, r *http.Request) (string, int
 				ticketInfoLive[idx] = TicketInfoLive{
 					Ticket:       ticket.Ticket,
 					TicketHeight: ticket.TicketHeight,
+				}
+			case "expired":
+				ticketInfoExpired[idx] = TicketInfoHistoric{
+					Ticket:        ticket.Ticket,
+					SpentByHeight: ticket.SpentByHeight,
+					TicketHeight:  ticket.TicketHeight,
 				}
 			case "missed":
 				ticketInfoMissed[idx] = TicketInfoHistoric{
@@ -1771,9 +1741,10 @@ func (controller *MainController) Tickets(c web.C, r *http.Request) (string, int
 
 	c.Env["TicketsInvalid"] = ticketInfoInvalid
 	c.Env["TicketsLive"] = ticketInfoLive
+	c.Env["TicketsExpired"] = ticketInfoExpired
 	c.Env["TicketsMissed"] = ticketInfoMissed
 	c.Env["TicketsVoted"] = ticketInfoVoted
-	widgets = controller.Parse(t, "tickets", c.Env)
+	widgets := controller.Parse(t, "tickets", c.Env)
 
 	c.Env["Content"] = template.HTML(widgets)
 	c.Env["Flash"] = session.Flashes("tickets")
