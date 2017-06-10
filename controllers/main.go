@@ -383,8 +383,6 @@ func (controller *MainController) APIStats(c web.C,
 		poolStatus = "Open"
 	}
 
-	actualMissed := gsi.Missed - gsi.Expired
-
 	stats := &poolapi.Stats{
 		AllMempoolTix:        gsi.AllMempoolTix,
 		APIVersionsSupported: controller.APIVersionsSupported,
@@ -393,7 +391,7 @@ func (controller *MainController) APIStats(c web.C,
 		Expired:              gsi.Expired,
 		Immature:             gsi.Immature,
 		Live:                 gsi.Live,
-		Missed:               actualMissed,
+		Missed:               gsi.Missed,
 		OwnMempoolTix:        gsi.OwnMempoolTix,
 		PoolSize:             gsi.PoolSize,
 		ProportionLive:       gsi.ProportionLive,
@@ -1518,8 +1516,6 @@ func (controller *MainController) Stats(c web.C, r *http.Request) (string, int) 
 		return "/error?r=/stats", http.StatusSeeOther
 	}
 
-	actualMissed := gsi.Missed - gsi.Expired
-
 	c.Env["Network"] = controller.params.Name
 	if controller.closePool {
 		c.Env["PoolStatus"] = "Closed"
@@ -1529,7 +1525,6 @@ func (controller *MainController) Stats(c web.C, r *http.Request) (string, int) 
 	c.Env["PoolEmail"] = controller.poolEmail
 	c.Env["PoolFees"] = controller.poolFees
 	c.Env["StakeInfo"] = gsi
-	c.Env["ActualMissed"] = actualMissed
 	c.Env["UserCount"] = userCount
 	c.Env["UserCountActive"] = userCountActive
 
