@@ -144,7 +144,11 @@ func runMain() int {
 	cfg = loadedCfg
 	dataPath := filepath.Join(cfg.DataDir, "data.json")
 
-	defer backendLog.Flush()
+	defer func() {
+		if logRotator != nil {
+			logRotator.Close()
+		}
+	}()
 
 	log.Infof("Version: %s", version())
 	log.Infof("Network: %s", activeNetParams.Params.Name)
@@ -267,7 +271,6 @@ func runMain() int {
 		log.Infof("CTRL+C hit.  Closing goroutines.")
 		//saveData(ctx)
 		close(ctx.quit)
-		return
 	}()
 
 	ctx.wg.Add(3)

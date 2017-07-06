@@ -3,6 +3,7 @@ package system
 import (
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"html/template"
 	"io"
 	"net/http"
@@ -151,6 +152,8 @@ func (application *Application) Route(controller interface{}, route string) web.
 			io.WriteString(w, body)
 		case http.StatusSeeOther, http.StatusFound:
 			http.Redirect(w, r, body, code)
+		case http.StatusUnauthorized:
+			http.Error(w, http.StatusText(403), 403)
 		case http.StatusInternalServerError:
 			http.Error(w, http.StatusText(500), 500)
 		}
@@ -162,7 +165,7 @@ func saveSession(c web.C, w http.ResponseWriter, r *http.Request) error {
 	if session, exists := c.Env["Session"]; exists {
 		return session.(*sessions.Session).Save(r, w)
 	}
-	return log.Errorf("Session not available")
+	return errors.New("Session not available")
 }
 
 // APIHandler executes an API processing function that provides an *APIResponse
