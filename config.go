@@ -16,7 +16,7 @@ import (
 	"strings"
 
 	flags "github.com/btcsuite/go-flags"
-	"github.com/decred/dcrutil"
+	"github.com/decred/dcrd/dcrutil"
 )
 
 const (
@@ -104,6 +104,7 @@ type config struct {
 	Version            string
 	VotingWalletExtPub string   `long:"votingwalletextpub" description:"The extended public key of the default account of the voting wallet"`
 	AdminIPs           []string `long:"adminips" description:"Expected admin host"`
+	AdminUserIDs       []string `long:"adminuserids" description:"User IDs of users who are allowed to access administrative functions."`
 	MinServers         int      `long:"minservers" description:"Minimum number of wallets connected needed to avoid errors"`
 	EnableStakepoold   bool     `long:"enablestakepoold" description:"Enable communication with stakepoold"`
 	MaxVotedAge        int64    `long:"maxvotedage" description:"Maximum vote age (blocks since vote) to include in voted tickets table"`
@@ -157,7 +158,7 @@ func supportedSubsystems() []string {
 		subsystems = append(subsystems, subsysID)
 	}
 
-	// Sort the subsytems for stable display.
+	// Sort the subsystems for stable display.
 	sort.Strings(subsystems)
 	return subsystems
 }
@@ -166,7 +167,7 @@ func supportedSubsystems() []string {
 // the levels accordingly.  An appropriate error is returned if anything is
 // invalid.
 func parseAndSetDebugLevels(debugLevel string) error {
-	// When the specified string doesn't have any delimters, treat it as
+	// When the specified string doesn't have any delimiters, treat it as
 	// the log level for all subsystems.
 	if !strings.Contains(debugLevel, ",") && !strings.Contains(debugLevel, "=") {
 		// Validate debug log level.
@@ -489,6 +490,13 @@ func loadConfig() (*config, []string, error) {
 
 	if len(cfg.AdminIPs) == 0 {
 		str := "%s: adminips is not set in config"
+		err := fmt.Errorf(str, funcName)
+		fmt.Fprintln(os.Stderr, err)
+		return nil, nil, err
+	}
+
+	if len(cfg.AdminUserIDs) == 0 {
+		str := "%s: adminuserids is not set in config"
 		err := fmt.Errorf(str, funcName)
 		fmt.Fprintln(os.Stderr, err)
 		return nil, nil, err

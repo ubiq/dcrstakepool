@@ -16,7 +16,7 @@ import (
 	"strings"
 
 	flags "github.com/btcsuite/go-flags"
-	"github.com/decred/dcrutil"
+	"github.com/decred/dcrd/dcrutil"
 )
 
 const (
@@ -365,7 +365,7 @@ func loadConfig() (*config, []string, error) {
 
 	// Create the home directory if it doesn't already exist.
 	funcName := "loadConfig"
-	err = os.MkdirAll(defaultHomeDir, 0700)
+	err = os.MkdirAll(cfg.HomeDir, 0700)
 	if err != nil {
 		// Show a nicer error message if it's because a symlink is
 		// linked to a directory that does not exist (probably because

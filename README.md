@@ -1,5 +1,8 @@
-dcrstakepool
-====
+# dcrstakepool
+
+[![GoDoc](https://godoc.org/github.com/decred/dcrstakepool?status.svg)](https://godoc.org/github.com/decred/dcrstakepool)
+[![Build Status](https://travis-ci.org/decred/dcrstakepool.svg?branch=master)](https://travis-ci.org/decred/dcrstakepool)
+[![Go Report Card](https://goreportcard.com/badge/github.com/decred/dcrstakepool)](https://goreportcard.com/report/github.com/decred/dcrstakepool)
 
 dcrstakepool is a web application which coordinates generating 1-of-2 multisig
 addresses on a pool of [dcrwallet](https://github.com/decred/dcrwallet) servers
@@ -15,6 +18,34 @@ vote on their behalf when the ticket is selected.
   production use on mainnet.
 - The architecture is subject to change in the future to lessen the dependence
   on dcrwallet and MySQL.
+
+## Git Tip Release notes
+
+- The handling of tickets considered invalid because they pay too-low-of-a-fee
+is now integrated directly into dcrstakepool and stakepoold.
+  - Users who pass both the adminIPs and the new adminUserIDs checks will see a new link on the
+menu to the new administrative add tickets page.
+  - Tickets are added to the MySQL database and then stakepoold is triggered to pull an update from the
+database and reload its config.
+  - To accommodate changes to the gRPC API, dcrstakepool/stakepoold had
+  their API versions changed to require/advertize 4.0.0. This requires
+  performing the upgrade steps outlined below.
+- **KNOWN ISSUE** Total tickets count reported by stakepoold may
+  not be totally accurate until low fee tickets that have been added to
+  the database can be marked as voted.  This will be resolved by future work. ([#201](https://github.com/decred/dcrstakepool/issues/201)).
+
+## Git Tip Upgrade Guide
+
+1) Announce maintenance and shut down dcrstakepool.
+2) Upgrade Go to the latest stable version if necessary/possible.
+3) Perform an upgrade of each stakepoold instance one at a time.
+   * Stop stakepoold.
+   * Build and restart stakepoold.
+4) Edit dcrstakepool.conf and set adminIPs/adminUserIDs appropriately to include
+   the administrative staff for whom you wish give the ability to add low fee
+   tickets for voting.
+5) Upgrade and start dcrstakepool after setting adminUserIDs.
+6) Announce maintenance complete after verifying functionality.
 
 ## 1.1.1 Release Notes
 
@@ -78,17 +109,17 @@ Building or updating from source requires the following build dependencies:
   Installation instructions can be found here: http://golang.org/doc/install.
   It is recommended to add `$GOPATH/bin` to your `PATH` at this point.
 
-- **Glide**
+- **Dep**
 
-  Glide is used to manage project dependencies and provide reproducible builds.
+  Dep is used to manage project dependencies and provide reproducible builds.
   To install:
 
-  `go get -u github.com/Masterminds/glide`
+  `go get -u github.com/golang/dep/cmd/dep`
 
-Unfortunately, the use of `glide` prevents a handy tool such as `go get` from
+Unfortunately, the use of `dep` prevents a handy tool such as `go get` from
 automatically downloading, building, and installing the source in a single
 command.  Instead, the latest project and dependency sources must be first
-obtained manually with `git` and `glide`, and then `go` is used to build and
+obtained manually with `git` and `dep`, and then `go` is used to build and
 install the project.
 
 - Run the following command to obtain the dcrstakepool code and all dependencies:
@@ -96,7 +127,7 @@ install the project.
 ```bash
 $ git clone https://github.com/decred/dcrstakepool $GOPATH/src/github.com/decred/dcrstakepool
 $ cd $GOPATH/src/github.com/decred/dcrstakepool
-$ glide install
+$ dep ensure
 ```
 
 - Assuming you have done the below configuration, build and run dcrstakepool:
@@ -122,7 +153,7 @@ matching dependencies:
 ```bash
 $ cd $GOPATH/src/github.com/decred/dcrstakepool
 $ git pull
-$ glide install
+$ dep ensure
 $ go build
 $ cd $GOPATH/src/github.com/decred/dcrstakepool/backend/stakepoold
 $ go build
@@ -201,6 +232,9 @@ MySQL> CREATE DATABASE stakepool;
 
 - Adapt sample-nginx.conf or setup a different web server in a proxy configuration
 
+#### stakepoold
+- Adapt sample-stakepoold.conf and run stakepoold.
+
 #### dcrstakepool
 
 - Create the .dcrstakepool directory and copy dcrwallet certs to it
@@ -209,6 +243,8 @@ $ mkdir ~/.dcrstakepool
 $ cd ~/.dcrstakepool
 $ scp walletserver1:~/.dcrwallet/rpc.cert wallet1.cert
 $ scp walletserver2:~/.dcrwallet/rpc.cert wallet2.cert
+$ scp walletserver1:~/.stakepoold/rpc.cert stakepoold1.cert
+$ scp walletserver2:~/.stakepoold/rpc.cert stakepoold2.cert
 ```
 
 - Copy sample config and edit appropriately
@@ -248,6 +284,17 @@ If you are modifying templates, sending the USR1 signal to the dcrstakepool proc
   Changing the baseURL requires all API Tokens to be re-generated.
 
 ## Adding Invalid Tickets
+
+#### For Newer versions / git tip
+
+If a user pays an incorrect fee, login as an account that meets the
+adminUserIps and adminUserIds restrictions and click the 'Add Low Fee Tickets'
+link in the menu.  You will be presented with a list of tickets that are
+suitable for adding.  Check the appropriate one(s) and click the submit button.
+Upon success, you should see the stakepoold logs reflect that the new tickets
+were processed.
+
+#### For v1.1.1 and below
 
 If a user pays an incorrect fee you may add their tickets like so (requires dcrd running with txindex=1):
 
