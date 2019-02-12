@@ -47,7 +47,6 @@ type appContext struct {
 	userVotingConfig        map[string]userdata.UserVotingConfig // [multisigaddr]
 
 	// no locking required
-	coldwalletextpub       *hdkeychain.ExtendedKey
 	dataPath               string
 	feeAddrs               map[string]struct{}
 	poolFees               float64
@@ -55,8 +54,6 @@ type appContext struct {
 	newTicketsChan         chan NewTicketsForBlock
 	nodeConnection         *rpcclient.Client
 	params                 *chaincfg.Params
-	lastBlockSeenHash      *chainhash.Hash
-	lastBlockSeenHeight    int64
 	wg                     sync.WaitGroup // wait group for go routine exits
 	quit                   chan struct{}
 	spentmissedTicketsChan chan SpentMissedTicketsForBlock
@@ -95,7 +92,7 @@ type WinningTicketsForBlock struct {
 var (
 	cfg              *config
 	errDuplicateVote = "-32603: already have transaction "
-	errNoTxInfo      = "-5: No information for transaction"
+	errNoTxInfo      = "-5: no information for transaction"
 	errSuccess       = errors.New("success")
 
 	dataFilenameTemplate = "KIND-DATE-VERSION.gob"
@@ -121,7 +118,7 @@ var (
 	ticketTypeSpentMissed = "SpentMissed"
 )
 
-// calculateFeeAddresses decodes the string of stake pool payment addresses
+// calculateFeeAddresses decodes the string of voting service payment addresses
 // to search incoming tickets for. The format for the passed string is:
 // "xpub...:end"
 // where xpub... is the extended public key and end is the last
@@ -131,7 +128,7 @@ var (
 func calculateFeeAddresses(xpubStr string, params *chaincfg.Params) (map[string]struct{}, error) {
 	end := uint32(10000)
 
-	log.Infof("Please wait, deriving %v stake pool fees addresses "+
+	log.Infof("Please wait, deriving %v voting service fees addresses "+
 		"for extended public key %s", end, xpubStr)
 
 	// Parse the extended public key and ensure it's the right network.
@@ -184,10 +181,10 @@ func deriveChildAddresses(key *hdkeychain.ExtendedKey, startIndex, count uint32,
 	return addresses, nil
 }
 
-// evaluateStakePoolTicket evaluates a stake pool ticket to see if it's
-// acceptable to the stake pool. The ticket must pay out to the stake
-// pool cold wallet, and must have a sufficient fee.
-func evaluateStakePoolTicket(ctx *appContext, tx *wire.MsgTx, blockHeight int32, poolUser dcrutil.Address) (bool, error) {
+// evaluateStakePoolTicket evaluates a voting service ticket to see if it's
+// acceptable to the voting service. The ticket must pay out to the voting
+// service cold wallet, and must have a sufficient fee.
+func evaluateStakePoolTicket(ctx *appContext, tx *wire.MsgTx, blockHeight int32) (bool, error) {
 	// Check the first commitment output (txOuts[1])
 	// and ensure that the address found there exists
 	// in the list of approved addresses. Also ensure
@@ -237,7 +234,7 @@ func evaluateStakePoolTicket(ctx *appContext, tx *wire.MsgTx, blockHeight int32,
 		if commitAmt < feeNeeded {
 			log.Warnf("User %s submitted ticket %v which "+
 				"has less fees than are required to use this "+
-				"stake pool and is being skipped (required: %v"+
+				"Voting service and is being skipped (required: %v"+
 				", found %v)", commitAddr.EncodeAddress(),
 				tx.TxHash(), feeNeeded, commitAmt)
 
@@ -251,7 +248,7 @@ func evaluateStakePoolTicket(ctx *appContext, tx *wire.MsgTx, blockHeight int32,
 		return false, nil
 	}
 
-	log.Debugf("Accepted valid stake pool ticket %v committing %v in fees",
+	log.Debugf("Accepted valid voting service ticket %v committing %v in fees",
 		tx.TxHash(), tx.TxOut[0].Value)
 
 	return true, nil
@@ -346,21 +343,21 @@ func runMain() error {
 		log.Infof("loaded prefs for %d users from MySQL", len(userVotingConfig))
 	}
 
-	err = txrules.IsValidPoolFeeRate(cfg.PoolFees)
-	if err != nil {
-		log.Errorf("poolfees is invalid: %v", err)
+	if !txrules.ValidPoolFeeRate(cfg.PoolFees) {
+		err = fmt.Errorf("poolfees '%v' is invalid", cfg.PoolFees)
+		log.Error(err)
 		return err
 	}
 
 	ctx := &appContext{
-		addedLowFeeTicketsMSA: addedLowFeeTicketsMSA,
-		dataPath:              cfg.DataDir,
-		feeAddrs:              feeAddrs,
-		poolFees:              cfg.PoolFees,
-		grpcCommandQueueChan:  make(chan *rpcserver.GRPCCommandQueue),
-		newTicketsChan:        make(chan NewTicketsForBlock),
-		params:                activeNetParams.Params,
-		quit:                  make(chan struct{}),
+		addedLowFeeTicketsMSA:  addedLowFeeTicketsMSA,
+		dataPath:               cfg.DataDir,
+		feeAddrs:               feeAddrs,
+		poolFees:               cfg.PoolFees,
+		grpcCommandQueueChan:   make(chan *rpcserver.GRPCCommandQueue),
+		newTicketsChan:         make(chan NewTicketsForBlock),
+		params:                 activeNetParams.Params,
+		quit:                   make(chan struct{}),
 		spentmissedTicketsChan: make(chan SpentMissedTicketsForBlock),
 		userData:               userData,
 		userVotingConfig:       userVotingConfig,
@@ -435,7 +432,7 @@ func runMain() error {
 		}
 		log.Infof("current block height %v hash %v", curHeight, curHash)
 
-		ctx.ignoredLowFeeTicketsMSA, ctx.liveTicketsMSA, err = walletGetTickets(ctx, curHeight)
+		ctx.ignoredLowFeeTicketsMSA, ctx.liveTicketsMSA, err = walletGetTickets(ctx)
 		if err != nil {
 			log.Errorf("unable to get tickets: %v", err)
 			return err
@@ -706,11 +703,11 @@ func saveData(ctx *appContext) {
 		}
 
 		w, err := os.Create(destPath)
-		defer w.Close()
 		if err != nil {
 			log.Errorf("Error opening file %s: %v", ctx.dataPath, err)
 			continue
 		}
+		defer w.Close()
 
 		switch filenameprefix {
 		case "AddedLowFeeTickets":
@@ -741,22 +738,20 @@ func saveData(ctx *appContext) {
 // ticketMetadata contains all the bits and pieces required to vote new tickets,
 // to look up new/missed/spent tickets, and to print statistics after usage.
 type ticketMetadata struct {
-	blockHash        *chainhash.Hash
-	blockHeight      int64
-	msa              string                    // multisig
-	ticket           *chainhash.Hash           // ticket
-	spent            bool                      // spent (true) or missed (false)
-	config           userdata.UserVotingConfig // voting config
-	duration         time.Duration             // overall vote duration
-	getDuration      time.Duration             // time to gettransaction
-	hex              string                    // hex encoded tx data
-	txid             *chainhash.Hash           // transaction id
-	ticketType       string                    // new or spentmissed
-	signDuration     time.Duration             // time to generatevote
-	sendDuration     time.Duration             // time to sendrawtransaction
-	err              error                     // log errors along the way
-	voteBits         uint16                    // voteBits
-	voteBitsExtended string                    // voteBits extended
+	blockHash    *chainhash.Hash
+	blockHeight  int64
+	msa          string                    // multisig
+	ticket       *chainhash.Hash           // ticket
+	spent        bool                      // spent (true) or missed (false)
+	config       userdata.UserVotingConfig // voting config
+	duration     time.Duration             // overall vote duration
+	getDuration  time.Duration             // time to gettransaction
+	hex          string                    // hex encoded tx data
+	txid         *chainhash.Hash           // transaction id
+	ticketType   string                    // new or spentmissed
+	signDuration time.Duration             // time to generatevote
+	sendDuration time.Duration             // time to sendrawtransaction
+	err          error                     // log errors along the way
 }
 
 // getticket pulls the transaction information for a ticket from dcrwallet. This is a go routine!
@@ -949,20 +944,13 @@ func (ctx *appContext) processNewTickets(nt NewTicketsForBlock) {
 			continue
 		}
 
-		// decode address
-		addr, err := dcrutil.DecodeAddress(n.msa)
-		if err != nil {
-			log.Warnf("invalid address %v", err)
-			continue
-		}
-
 		msgTx := MsgTxFromHex(n.hex)
 		if msgTx == nil {
 			log.Warnf("MsgTxFromHex failed for %v", n.hex)
 			continue
 		}
 
-		ticketFeesValid, err := evaluateStakePoolTicket(ctx, msgTx, int32(nt.blockHeight), addr)
+		ticketFeesValid, err := evaluateStakePoolTicket(ctx, msgTx, int32(nt.blockHeight))
 		if err != nil {
 			log.Warnf("ignoring ticket %v for msa %v ticketFeesValid %v err %v",
 				n.ticket, n.msa, ticketFeesValid, err)

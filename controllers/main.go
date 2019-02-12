@@ -1,19 +1,24 @@
+// Copyright (c) 2016-2019 The Decred developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
+
 package controllers
 
 import (
-	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"html/template"
 	"net"
 	"net/http"
-	"net/smtp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/dajohi/goemail"
+	"github.com/dchest/captcha"
 	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrd/chaincfg/chainhash"
 	"github.com/decred/dcrd/dcrjson"
@@ -26,7 +31,6 @@ import (
 	"github.com/decred/dcrstakepool/system"
 	"github.com/decred/dcrwallet/wallet/udb"
 	"github.com/go-gorp/gorp"
-	"github.com/haisum/recaptcha"
 	"github.com/zenazn/goji/web"
 
 	"google.golang.org/grpc"
@@ -35,11 +39,11 @@ import (
 )
 
 var (
-	// MaxUsers is the maximum number of users supported by a stake pool.
+	// MaxUsers is the maximum number of users supported by a voting service.
 	// This is an artificial limit and can be increased by adjusting the
 	// ticket/fee address indexes above 10000.
 	MaxUsers            = 10000
-	signupEmailSubject  = "Ubiq Stake pool email verification"
+	signupEmailSubject  = "Ubiq Voting service provider email verification"
 	signupEmailTemplate = "A request for an account for __URL__\r\n" +
 		"was made from __REMOTEIP__ for this email address.\r\n\n" +
 		"If you made this request, follow the link below:\r\n\n" +
@@ -72,22 +76,13 @@ type MainController struct {
 	params               *chaincfg.Params
 	rpcServers           *walletSvrManager
 	realIPHeader         string
-	recaptchaSecret      string
-	recaptchaSiteKey     string
+	captchaHandler       *CaptchaHandler
 	smtpFrom             string
-	smtpHost             string
-	smtpUsername         string
-	smtpPassword         string
+	smtpServer           *goemail.SMTP
 	version              string
 	voteVersion          uint32
 	votingXpub           *hdkeychain.ExtendedKey
 	maxVotedAge          int64
-}
-
-func randToken() string {
-	b := make([]byte, 16)
-	rand.Read(b)
-	return fmt.Sprintf("%x", b)
 }
 
 // Get the client's real IP address using the X-Real-IP header, or if that is
@@ -115,10 +110,9 @@ func getClientIP(r *http.Request, realIPHeader string) string {
 func NewMainController(params *chaincfg.Params, adminIPs []string,
 	adminUserIDs []string, APISecret string, APIVersionsSupported []int,
 	baseURL string, closePool bool, closePoolMsg string, enablestakepoold bool,
-	feeXpubStr string,
-	grpcConnections []*grpc.ClientConn, poolFees float64, poolEmail, poolLink,
-	recaptchaSecret, recaptchaSiteKey string, smtpFrom, smtpHost, smtpUsername,
-	smtpPassword, version string, walletHosts, walletCerts, walletUsers,
+	feeXpubStr string, grpcConnections []*grpc.ClientConn, poolFees float64,
+	poolEmail, poolLink, smtpFrom, smtpHost, smtpUsername, smtpPassword,
+	version string, walletHosts, walletCerts, walletUsers,
 	walletPasswords []string, minServers int, realIPHeader,
 	votingXpubStr string, maxVotedAge int64) (*MainController, error) {
 
@@ -145,6 +139,18 @@ func NewMainController(params *chaincfg.Params, adminIPs []string,
 		return nil, err
 	}
 
+	ch := &CaptchaHandler{
+		ImgHeight: 127,
+		ImgWidth:  257,
+	}
+
+	smtpUrl := fmt.Sprintf("smtp://%s:%s@%s", smtpUsername, smtpPassword, smtpHost)
+	tlsConfig := tls.Config{}
+	smtpServer, err := goemail.NewSMTP(smtpUrl, &tlsConfig)
+	if err != nil {
+		return nil, err
+	}
+
 	mc := &MainController{
 		adminIPs:             adminIPs,
 		adminUserIDs:         adminUserIDs,
@@ -160,14 +166,11 @@ func NewMainController(params *chaincfg.Params, adminIPs []string,
 		poolFees:             poolFees,
 		poolLink:             poolLink,
 		params:               params,
-		recaptchaSecret:      recaptchaSecret,
-		recaptchaSiteKey:     recaptchaSiteKey,
+		captchaHandler:       ch,
 		rpcServers:           rpcs,
 		realIPHeader:         realIPHeader,
 		smtpFrom:             smtpFrom,
-		smtpHost:             smtpHost,
-		smtpUsername:         smtpUsername,
-		smtpPassword:         smtpPassword,
+		smtpServer:           smtpServer,
 		version:              version,
 		votingXpub:           voteKey,
 		maxVotedAge:          maxVotedAge,
@@ -185,9 +188,9 @@ func NewMainController(params *chaincfg.Params, adminIPs []string,
 }
 
 // getNetworkName will strip any suffix from a network name starting with
-// "testnet" (e.g. "testnet2"). This is primarily intended for the tickets page,
+// "testnet" (e.g. "testnet3"). This is primarily intended for the tickets page,
 // which generates block explorer links using a value set by the network string,
-// which is a problem since there is no testnet2.decred.org host.
+// which is a problem since there is no testnet3.dcrdata.org host.
 func (controller *MainController) getNetworkName() string {
 	if strings.HasPrefix(controller.params.Name, "testnet") {
 		return "testnet"
@@ -486,34 +489,14 @@ func (controller *MainController) isAdmin(c web.C, r *http.Request) (bool, error
 // SendMail sends an email with the passed data using the system's SMTP
 // configuration.
 func (controller *MainController) SendMail(emailaddress string, subject string, body string) error {
-
-	hostname := controller.smtpHost
-
-	if strings.Contains(controller.smtpHost, ":") {
-		parts := strings.Split(controller.smtpHost, ":")
-		hostname = parts[0]
-	}
-
-	// Set up authentication information.
-	auth := smtp.PlainAuth("", controller.smtpUsername, controller.smtpPassword, hostname)
-
 	// Connect to the server, authenticate, set the sender and recipient,
 	// and send the email all in one step.
-	to := []string{emailaddress}
-	msg := []byte("To: " + emailaddress + "\r\n" +
-		"From: " + controller.smtpFrom + "\r\n" +
-		"Subject: " + subject + "\r\n" +
-		"\r\n" +
-		body + "\r\n")
+	mailMsg := goemail.NewMessage(controller.smtpFrom, subject, body)
+	mailMsg.AddTo(emailaddress)
 
-	if controller.smtpHost == "" {
-		log.Warn("no mail server configured -- skipping sending " + string(msg))
-		return nil
-	}
-
-	err := smtp.SendMail(controller.smtpHost, auth, controller.smtpFrom, to, msg)
+	err := controller.smtpServer.Send(mailMsg)
 	if err != nil {
-		log.Errorf("Error sending email to %v", err)
+		log.Errorf("Error sending email to %v: %v", emailaddress, err)
 	}
 	return err
 }
@@ -835,7 +818,7 @@ func (controller *MainController) AddressPost(c web.C, r *http.Request) (string,
 	dbMap := controller.GetDbMap(c)
 	user, _ := models.GetUserById(dbMap, session.Values["UserId"].(int64))
 	if len(user.UserPubKeyAddr) > 0 {
-		session.AddFlash("Stake pool is currently limited to one address per account", "address")
+		session.AddFlash("The voting service is currently limited to one address per account", "address")
 		return controller.Address(c, r)
 	}
 
@@ -989,7 +972,8 @@ func (controller *MainController) AdminStatus(c web.C, r *http.Request) (string,
 	// Attempt to query wallet statuses
 	walletInfo, err := controller.WalletStatus()
 	if err != nil {
-		// decide when to throw err here
+		log.Errorf("Failed to execute WalletStatus: %v", err)
+		return "/error", http.StatusSeeOther
 	}
 
 	type WalletInfoPage struct {
@@ -1043,7 +1027,7 @@ func (controller *MainController) AdminStatus(c web.C, r *http.Request) (string,
 	t := controller.GetTemplate(c)
 	c.Env["Admin"] = isAdmin
 	c.Env["IsAdminStatus"] = true
-	c.Env["Title"] = "Decred Stake Pool - Status (Admin)"
+	c.Env["Title"] = "Ubiq Decred Voting Service - Status (Admin)"
 
 	// Set info to be used by admins on /status page.
 	c.Env["StakepooldInfo"] = stakepooldPageInfo
@@ -1092,7 +1076,7 @@ func (controller *MainController) AdminTickets(c web.C, r *http.Request) (string
 	c.Env["IgnoredLowFeeTickets"], _ = controller.StakepooldGetIgnoredLowFeeTickets()
 	widgets := controller.Parse(t, "admin/tickets", c.Env)
 
-	c.Env["Title"] = "Decred Stake Pool - Tickets (Admin)"
+	c.Env["Title"] = "Ubiq Decred Voting Service - Tickets (Admin)"
 	c.Env["Content"] = template.HTML(widgets)
 
 	return controller.Parse(t, "main", c.Env), http.StatusOK
@@ -1103,6 +1087,12 @@ func (controller *MainController) AdminTicketsPost(c web.C, r *http.Request) (st
 	session := controller.GetSession(c)
 	dbMap := controller.GetDbMap(c)
 	remoteIP := getClientIP(r, controller.realIPHeader)
+
+	userID, ok := session.Values["UserId"].(int64)
+	if !ok {
+		log.Warnf("UserId not set!")
+		return "", http.StatusUnauthorized
+	}
 
 	isAdmin, err := controller.isAdmin(c, r)
 	if !isAdmin {
@@ -1116,73 +1106,88 @@ func (controller *MainController) AdminTicketsPost(c web.C, r *http.Request) (st
 		return "/admintickets", http.StatusSeeOther
 	}
 
-	if len(r.PostForm["tickets[]"]) == 0 {
+	ticketList := r.PostForm["tickets[]"]
+
+	if len(ticketList) == 0 {
 		session.AddFlash("no tickets selected to modify", "adminTicketsError")
 		return "/admintickets", http.StatusSeeOther
 	}
 
-	switch r.PostFormValue("action") {
-	case "Add", "Remove":
-		// valid
-		break
+	// Validate each of the ticket hash strings.
+	ticketHashes, err := models.DecodeHashList(ticketList)
+	if err != nil {
+		session.AddFlash("Invalid ticket in form data: "+err.Error(),
+			"adminTicketsError")
+		return "/admintickets", http.StatusSeeOther
+	}
+
+	action := strings.ToLower(r.PostFormValue("action"))
+	switch action {
+	case "add", "remove":
+		// recognized action
 	default:
 		session.AddFlash("invalid or unknown form action type", "adminTicketsError")
 		return "/admintickets", http.StatusSeeOther
 	}
 
-	actionVerb := "Unknown"
-	switch r.PostFormValue("action") {
-	case "Add":
+	actionVerb := "unknown"
+	switch action {
+	case "add":
 		actionVerb = "added"
 		ignoredLowFeeTickets, err := controller.StakepooldGetIgnoredLowFeeTickets()
 		if err != nil {
-			session.AddFlash("GetIgnoredLowFeeTickets error: "+err.Error(), "adminTicketsError")
+			session.AddFlash("GetIgnoredLowFeeTickets error: "+err.Error(),
+				"adminTicketsError")
 			return "/admintickets", http.StatusSeeOther
 		}
 
-		for _, ticketToAddString := range r.PostForm["tickets[]"] {
-			t := time.Now()
+		for i, tickethash := range ticketHashes {
+			t := ticketList[i]
 
 			// TODO check if it is already present in the database
 			// and error out if so
 
-			tickethash, err := chainhash.NewHashFromStr(ticketToAddString)
-			if err != nil {
-				session.AddFlash("NewHashFromStr failed for "+ticketToAddString+": "+err.Error(), "adminTicketsError")
-				return "/admintickets", http.StatusSeeOther
-			}
-
-			msa, exists := ignoredLowFeeTickets[*tickethash]
+			msa, exists := ignoredLowFeeTickets[tickethash]
 			if !exists {
-				session.AddFlash("ticket " + ticketToAddString + " is no longer present")
+				session.AddFlash("ticket " + t + " is no longer present")
 				return "/admintickets", http.StatusSeeOther
 			}
 
 			expires := controller.CalcEstimatedTicketExpiry()
 
 			lowFeeTicket := &models.LowFeeTicket{
-				AddedByUid:    session.Values["UserId"].(int64),
+				AddedByUid:    userID,
 				TicketAddress: msa,
-				TicketHash:    ticketToAddString,
+				TicketHash:    t,
 				TicketExpiry:  0,
 				Voted:         0,
-				Created:       t.Unix(),
+				Created:       time.Now().Unix(),
 				Expires:       expires.Unix(),
 			}
 
-			if err := models.InsertLowFeeTicket(dbMap, lowFeeTicket); err != nil {
-				session.AddFlash("Database error occurred while adding ticket "+ticketToAddString, "adminTicketsError")
+			err = models.InsertLowFeeTicket(dbMap, lowFeeTicket)
+			if err != nil {
+				session.AddFlash("Database error occurred while adding ticket "+
+					t, "adminTicketsError")
 				log.Warnf("Adding ticket %v failed: %v", tickethash, err)
 				return "/admintickets", http.StatusSeeOther
 			}
 		}
-	case "Remove":
+
+	case "remove":
 		actionVerb = "removed"
-		query := "DELETE FROM LowFeeTicket WHERE TicketHash IN (\"" +
-			strings.Join(r.PostForm["tickets[]"], ",") + "\")"
-		_, err := dbMap.Exec(query)
+		// To use gorm's slice expansion, use a mapper with a ticketList. For
+		// three tickets in the list, gorm will expand this to:
+		//     "... IN (:Tickets0,:Tickets1,:Tickets2)".
+		// This allows each string in the list two be it's own argument.
+		query := "DELETE FROM LowFeeTicket WHERE TicketHash IN (:Tickets)"
+		ticketListMapper := map[string]interface{}{
+			"Tickets": ticketList,
+		}
+		_, err := dbMap.Exec(query, ticketListMapper)
 		if err != nil {
-			session.AddFlash("failed to execute delete query: "+err.Error(), "adminTicketsError")
+			session.AddFlash("failed to execute delete query: "+err.Error(),
+				"adminTicketsError")
 			return "/admintickets", http.StatusSeeOther
 		}
 	}
@@ -1192,11 +1197,10 @@ func (controller *MainController) AdminTicketsPost(c web.C, r *http.Request) (st
 		session.AddFlash("StakepooldUpdateAll error: "+err.Error(), "adminTicketsError")
 	}
 
-	log.Infof("ip %v userid %v %v for %v ticket(s)",
-		remoteIP, session.Values["UserId"].(int64), actionVerb,
-		len(r.PostForm["tickets[]"]))
-	session.AddFlash("successfully "+actionVerb+" "+
-		strconv.Itoa(len(r.PostForm["tickets[]"]))+" ticket(s)", "adminTicketsSuccess")
+	log.Infof("ip %s userid %d %s for %d ticket(s)", remoteIP, userID,
+		actionVerb, len(ticketList))
+	session.AddFlash(fmt.Sprintf("successfully %s %d ticket(s)", actionVerb,
+		len(ticketList)), "adminTicketsSuccess")
 
 	return "/admintickets", http.StatusSeeOther
 }
@@ -1207,106 +1211,123 @@ func (controller *MainController) EmailUpdate(c web.C, r *http.Request) (string,
 	session := controller.GetSession(c)
 	dbMap := controller.GetDbMap(c)
 
-	// validate that the token is set, valid, and not expired.
-	token := r.URL.Query().Get("t")
-
-	if token != "" {
-		failed := false
-		emailChange, err := helpers.EmailChangeTokenExists(dbMap, token)
-		if err != nil {
-			session.AddFlash("Email verification token not valid",
-				"emailupdateError")
-			failed = true
-		}
-
-		if !failed {
-			if emailChange.Expires-time.Now().Unix() <= 0 {
-				session.AddFlash("Email change token has expired",
-					"emailupdateError")
-				failed = true
-			}
-		}
-
-		// possible that someone signed up with this email in the time between
-		// when the token was generated and now.
-		if !failed {
-			userExists := models.GetUserByEmail(dbMap, emailChange.NewEmail)
-			if userExists != nil {
-				session.AddFlash("Email address is in use", "emailupdateError")
-				failed = true
-			}
-		}
-
-		if !failed {
-			err := helpers.EmailChangeComplete(dbMap, token)
-			if err != nil {
-				session.AddFlash("Error occurred while changing email address",
-					"emailupdateError")
-				log.Errorf("EmailChangeComplete failed %v", err)
-			} else {
-				// Logout the user to force them to sign in with their new
-				// email address
-				session.Values["UserId"] = nil
-				session.AddFlash("Email successfully updated",
-					"emailupdateSuccess")
-			}
-		}
-	} else {
-		session.AddFlash("No email verification token present",
-			"emailupdateError")
+	render := func() string {
+		c.Env["Title"] = "Ubiq Decred Voting Service - Email Update"
+		c.Env["FlashError"] = session.Flashes("emailupdateError")
+		c.Env["FlashSuccess"] = session.Flashes("emailupdateSuccess")
+		c.Env["IsEmailUpdate"] = true
+		widgets := controller.Parse(t, "emailupdate", c.Env)
+		c.Env["Content"] = template.HTML(widgets)
+		return controller.Parse(t, "main", c.Env)
 	}
 
-	c.Env["FlashError"] = session.Flashes("emailupdateError")
-	c.Env["FlashSuccess"] = session.Flashes("emailupdateSuccess")
+	// Validate that the token is set.
+	tokenStr := r.URL.Query().Get("t")
+	if tokenStr == "" {
+		session.AddFlash("No email verification token present",
+			"emailupdateError")
+		return render(), http.StatusOK
+	}
 
-	widgets := controller.Parse(t, "emailupdate", c.Env)
-	c.Env["IsEmailUpdate"] = true
-	c.Env["Title"] = "Ubiq Decred Stake Pool - Email Update"
-	c.Env["Content"] = template.HTML(widgets)
+	// Validate that the token is valid.
+	token, err := models.UserTokenFromStr(tokenStr)
+	if err != nil {
+		session.AddFlash("Email verification token not valid.",
+			"emailupdateError")
+		return render(), http.StatusOK
+	}
 
-	return controller.Parse(t, "main", c.Env), http.StatusOK
+	// Validate that the token is recognized.
+	emailChange, err := helpers.EmailChangeTokenExists(dbMap, token)
+	if err != nil {
+		session.AddFlash("Email verification token not recognized.",
+			"emailupdateError")
+		return render(), http.StatusOK
+	}
+
+	// Validate that the token is not expired.
+	expTime := time.Unix(emailChange.Expires, 0)
+	if expTime.Before(time.Now()) {
+		session.AddFlash("Email change token has expired.",
+			"emailupdateError")
+		return render(), http.StatusOK
+	}
+
+	// possible that someone signed up with this email in the time between
+	// when the token was generated and now.
+	userExists := models.GetUserByEmail(dbMap, emailChange.NewEmail)
+	if userExists != nil {
+		session.AddFlash("Email address is in use", "emailupdateError")
+		return render(), http.StatusOK
+	}
+
+	err = helpers.EmailChangeComplete(dbMap, token)
+	if err != nil {
+		session.AddFlash("Error occurred while changing email address",
+			"emailupdateError")
+		log.Errorf("EmailChangeComplete failed %v", err)
+	} else {
+		// Logout the user to force them to sign in with their new
+		// email address
+		session.Values["UserId"] = nil
+		session.AddFlash("Email successfully updated",
+			"emailupdateSuccess")
+	}
+	return render(), http.StatusOK
 }
 
 // EmailVerify renders the email verification page.
-func (controller *MainController) EmailVerify(c web.C, r *http.Request) (string,
-	int) {
+func (controller *MainController) EmailVerify(c web.C, r *http.Request) (string, int) {
 	t := controller.GetTemplate(c)
 	session := controller.GetSession(c)
 	dbMap := controller.GetDbMap(c)
 
-	// validate that the token is set and valid.
-	token := r.URL.Query().Get("t")
-
-	if token != "" {
-		_, err := helpers.EmailVerificationTokenExists(dbMap, token)
-		if err != nil {
-			session.AddFlash("Email verification token not valid",
-				"emailverifyError")
-		} else {
-			err := helpers.EmailVerificationComplete(dbMap, token)
-			if err != nil {
-				session.AddFlash("Unable to set email to verified status",
-					"emailverifyError")
-				log.Errorf("could not set email to verified %v", err)
-			} else {
-				session.AddFlash("Email successfully verified",
-					"emailverifySuccess")
-			}
-		}
-	} else {
-		session.AddFlash("No email verification token present",
-			"emailverifyError")
+	render := func() string {
+		c.Env["Title"] = "Ubiq Decred Voting Service - Email Verification"
+		c.Env["FlashError"] = session.Flashes("emailverifyError")
+		c.Env["FlashSuccess"] = session.Flashes("emailverifySuccess")
+		c.Env["IsEmailVerify"] = true
+		widgets := controller.Parse(t, "emailverify", c.Env)
+		c.Env["Content"] = template.HTML(widgets)
+		return controller.Parse(t, "main", c.Env)
 	}
 
-	c.Env["FlashError"] = session.Flashes("emailverifyError")
-	c.Env["FlashSuccess"] = session.Flashes("emailverifySuccess")
+	// Validate that the token is set.
+	tokenStr := r.URL.Query().Get("t")
+	if tokenStr == "" {
+		session.AddFlash("No email verification token present.",
+			"emailverifyError")
+		return render(), http.StatusOK
+	}
 
-	widgets := controller.Parse(t, "emailverify", c.Env)
-	c.Env["IsEmailVerify"] = true
-	c.Env["Title"] = "Ubiq Decred Stake Pool - Email Verification"
-	c.Env["Content"] = template.HTML(widgets)
+	// Validate that the token is valid.
+	token, err := models.UserTokenFromStr(tokenStr)
+	if err != nil {
+		session.AddFlash("Email verification token not valid.",
+			"emailverifyError")
+		return render(), http.StatusOK
+	}
 
-	return controller.Parse(t, "main", c.Env), http.StatusOK
+	// Validate that the token is recognized.
+	_, err = helpers.EmailVerificationTokenExists(dbMap, token)
+	if err != nil {
+		session.AddFlash("Email verification token not recognized.",
+			"emailverifyError")
+		return render(), http.StatusOK
+	}
+
+	// Set the email as verified.
+	err = helpers.EmailVerificationComplete(dbMap, token)
+	if err != nil {
+		session.AddFlash("Unable to set email to verified status.",
+			"emailverifyError")
+		log.Errorf("could not set email to verified %v", err)
+		return render(), http.StatusInternalServerError
+	}
+
+	session.AddFlash("Email successfully verified.",
+		"emailverifySuccess")
+	return render(), http.StatusOK
 }
 
 // Error renders the error page.
@@ -1350,45 +1371,41 @@ func (controller *MainController) Index(c web.C, r *http.Request) (string, int) 
 
 	c.Env["Admin"], _ = controller.isAdmin(c, r)
 	c.Env["IsIndex"] = true
-	c.Env["Title"] = "Ubiq Decred Stake Pool - Welcome"
+	c.Env["Title"] = "Ubiq Decred Voting Service - Welcome"
 	c.Env["Content"] = template.HTML(widgets)
 
 	return helpers.Parse(t, "main", c.Env), http.StatusOK
 }
 
-// PasswordReset renders the password reset page.
+// PasswordReset renders the password reset page. This shows the form where the
+// user enters their email address.
 func (controller *MainController) PasswordReset(c web.C, r *http.Request) (string, int) {
-	t := controller.GetTemplate(c)
+	c.Env["Title"] = "Ubiq Decred Voting Service - Password Reset"
 	session := controller.GetSession(c)
-	c.Env["FlashError"] = session.Flashes("passwordresetError")
+	c.Env["FlashError"] = append(session.Flashes("passwordresetError"), session.Flashes("captchaFailed")...)
 	c.Env["FlashSuccess"] = session.Flashes("passwordresetSuccess")
 	c.Env["IsPasswordReset"] = true
-	c.Env["RecaptchaSiteKey"] = controller.recaptchaSiteKey
-	if controller.smtpHost == "" {
-		c.Env["SMTPDisabled"] = true
-	}
+	c.Env["CaptchaID"] = captcha.New()
 
+	t := controller.GetTemplate(c)
 	widgets := controller.Parse(t, "passwordreset", c.Env)
-	c.Env["Title"] = "Ubiq Decred Stake Pool - Password Reset"
 	c.Env["Content"] = template.HTML(widgets)
 
 	return controller.Parse(t, "main", c.Env), http.StatusOK
 }
 
-// PasswordResetPost handles the posted password reset form.
+// PasswordResetPost handles the posted password reset form. This submits the
+// data entered into the email address form. If the email is recognized a
+// password reset token is generated and the user will check their email for a
+// link. The link will take them to the password update page with a token
+// specified on the URL.
 func (controller *MainController) PasswordResetPost(c web.C, r *http.Request) (string, int) {
 	email := r.FormValue("email")
 	session := controller.GetSession(c)
 	dbMap := controller.GetDbMap(c)
 
-	re := recaptcha.R{
-		Secret: controller.recaptchaSecret,
-	}
-
-	isValid := re.Verify(*r)
-	if !isValid {
-		log.Errorf("Recaptcha error %v", re.LastError())
-		session.AddFlash("Recaptcha error", "passwordresetError")
+	if !controller.IsCaptchaDone(c) {
+		session.AddFlash("You must complete the captcha.", "passwordresetError")
 		return controller.PasswordReset(c, r)
 	}
 
@@ -1401,10 +1418,10 @@ func (controller *MainController) PasswordResetPost(c web.C, r *http.Request) (s
 		t := time.Now()
 		expires := t.Add(time.Hour * 1)
 
-		token := randToken()
+		token := models.NewUserToken()
 		passReset := &models.PasswordReset{
 			UserId:  user.Id,
-			Token:   token,
+			Token:   token.String(),
 			Created: t.Unix(),
 			Expires: expires.Unix(),
 		}
@@ -1418,12 +1435,12 @@ func (controller *MainController) PasswordResetPost(c web.C, r *http.Request) (s
 		body := "A request to reset your password was made from IP address: " +
 			remoteIP + "\r\n\n" +
 			"If you made this request, follow the link below:\r\n\n" +
-			controller.baseURL + "/passwordupdate?t=" + token + "\r\n\n" +
+			controller.baseURL + "/passwordupdate?t=" + token.String() + "\r\n\n" +
 			"The above link expires an hour after this email was sent.\r\n\n" +
 			"If you did not make this request, you may safely ignore this " +
 			"email.\r\n" + "However, you may want to look into how this " +
 			"happened.\r\n"
-		err := controller.SendMail(user.Email, "Stake pool password reset", body)
+		err := controller.SendMail(user.Email, "Voting service password reset", body)
 		if err != nil {
 			session.AddFlash("Unable to send password reset email", "passwordresetError")
 			log.Errorf("error sending password reset email %v", err)
@@ -1441,83 +1458,69 @@ func (controller *MainController) PasswordResetPost(c web.C, r *http.Request) (s
 	return controller.PasswordReset(c, r)
 }
 
-// PasswordUpdate renders the password update page.
+// PasswordUpdate renders the password update page. When a user clicks the link
+// containing a token in the password reset email, this handler will validate
+// the token. When the token is valid, the user will be presented with forms to
+// enter their new password. PasswordUpdatePost handles the submission of these
+// forms, and calls PasswordUpdate again for page rendering.
 func (controller *MainController) PasswordUpdate(c web.C, r *http.Request) (string, int) {
 	t := controller.GetTemplate(c)
 	session := controller.GetSession(c)
-	dbMap := controller.GetDbMap(c)
 
-	// validate that the token is set, valid, and not expired.
-	token := r.URL.Query().Get("t")
-
-	if token != "" {
-		passwordReset, err := helpers.PasswordResetTokenExists(dbMap, token)
-		if err != nil {
-			session.AddFlash("Password update token not valid", "passwordupdateError")
-		} else {
-			if passwordReset.Expires-time.Now().Unix() <= 0 {
-				session.AddFlash("Password update token has expired", "passwordupdateError")
-			}
-		}
-	} else {
-		session.AddFlash("No password update token present", "passwordupdateError")
+	render := func() string {
+		c.Env["Title"] = "Ubiq Decred Voting Service - Password Update"
+		c.Env["FlashError"] = session.Flashes("passwordupdateError")
+		c.Env["FlashSuccess"] = session.Flashes("passwordupdateSuccess")
+		c.Env["IsPasswordUpdate"] = true
+		widgets := controller.Parse(t, "passwordupdate", c.Env)
+		c.Env["Content"] = template.HTML(widgets)
+		return controller.Parse(t, "main", c.Env)
 	}
 
-	c.Env["FlashError"] = session.Flashes("passwordupdateError")
-	c.Env["FlashSuccess"] = session.Flashes("passwordupdateSuccess")
+	// Just render the page if the POST handler already checked the token.
+	_, tokenChecked := c.Env["TokenValid"].(bool)
+	if tokenChecked {
+		return render(), http.StatusOK
+	}
 
-	widgets := controller.Parse(t, "passwordupdate", c.Env)
-	c.Env["IsPasswordUpdate"] = true
-	c.Env["Title"] = "Ubiq Decred Stake Pool - Password Update"
-	c.Env["Content"] = template.HTML(widgets)
-
-	return controller.Parse(t, "main", c.Env), http.StatusOK
+	// Use CheckPasswordResetToken to set relevant flash messages.
+	controller.CheckPasswordResetToken(r.URL.Query().Get("t"), c)
+	return render(), http.StatusOK
 }
 
-// PasswordUpdatePost handles updating passwords.
+// PasswordUpdatePost handles updating passwords. The token in the URL is from
+// the password reset email. The token is validated and the password is changed.
 func (controller *MainController) PasswordUpdatePost(c web.C, r *http.Request) (string, int) {
 	session := controller.GetSession(c)
 	dbMap := controller.GetDbMap(c)
 	remoteIP := getClientIP(r, controller.realIPHeader)
 
-	// validate that the token is set and not expired.
-	token := r.URL.Query().Get("t")
-
-	if token == "" {
-		session.AddFlash("No password update token present", "passwordupdateError")
+	// Ensure a valid password reset token is provided. If the token is valid,
+	// return the decoded UserToken and PasswordReset data for the token.
+	token, resetData, tokenOK := controller.CheckPasswordResetToken(
+		r.URL.Query().Get("t"), c)
+	c.Env["TokenValid"] = tokenOK
+	// tokenChecked will be true regardless of token validity.
+	if !tokenOK {
 		return controller.PasswordUpdate(c, r)
 	}
 
-	passwordReset, err := helpers.PasswordResetTokenExists(dbMap, token)
-	if err != nil {
-		log.Errorf("error updating password %v", err)
-		session.AddFlash("Password update token not valid",
-			"passwordupdateError")
-		return controller.PasswordUpdate(c, r)
-	}
-
-	if passwordReset.Expires-time.Now().Unix() <= 0 {
-		session.AddFlash("Password update token has expired",
-			"passwordupdateError")
-		return controller.PasswordUpdate(c, r)
-	}
-
-	password, passwordRepeat := r.FormValue("password"),
-		r.FormValue("passwordrepeat")
+	// Given a valid password reset token, process the password change.
+	password := r.FormValue("password")
 	if password == "" {
-		session.AddFlash("Password cannot be empty", "passwordupdateError")
+		session.AddFlash("Password cannot be empty.", "passwordupdateError")
 		return controller.PasswordUpdate(c, r)
 	}
-
+	passwordRepeat := r.FormValue("passwordrepeat")
 	if password != passwordRepeat {
-		session.AddFlash("Passwords do not match", "passwordupdateError")
+		session.AddFlash("Passwords do not match.", "passwordupdateError")
 		return controller.PasswordUpdate(c, r)
 	}
 
-	user, err := helpers.UserIDExists(dbMap, passwordReset.UserId)
+	user, err := helpers.UserIDExists(dbMap, resetData.UserId)
 	if err != nil {
 		log.Infof("UserIDExists failure %v, %v", err, remoteIP)
-		session.AddFlash("Unable to find User ID", "passwordupdateError")
+		session.AddFlash("Unable to find User ID.", "passwordupdateError")
 		return controller.PasswordUpdate(c, r)
 	}
 
@@ -1525,11 +1528,11 @@ func (controller *MainController) PasswordUpdatePost(c web.C, r *http.Request) (
 		user.Email)
 
 	user.HashPassword(password)
-	_, err = helpers.UpdateUserPasswordById(dbMap, passwordReset.UserId,
+	_, err = helpers.UpdateUserPasswordById(dbMap, resetData.UserId,
 		user.Password)
 	if err != nil {
 		log.Errorf("error updating password %v", err)
-		session.AddFlash("Unable to update password", "passwordupdateError")
+		session.AddFlash("Unable to update password.", "passwordupdateError")
 		return controller.PasswordUpdate(c, r)
 	}
 
@@ -1566,25 +1569,21 @@ func (controller *MainController) Settings(c web.C, r *http.Request) (string, in
 		user, _ = models.GetUserById(dbMap, session.Values["UserId"].(int64))
 	}
 
-	t := controller.GetTemplate(c)
-
 	c.Env["Admin"], _ = controller.isAdmin(c, r)
 	c.Env["APIToken"] = user.APIToken
-	c.Env["FlashError"] = session.Flashes("settingsError")
+	c.Env["FlashError"] = append(session.Flashes("settingsError"), session.Flashes("captchaFailed")...)
 	c.Env["FlashSuccess"] = session.Flashes("settingsSuccess")
 	c.Env["IsSettings"] = true
-	c.Env["RecaptchaSiteKey"] = controller.recaptchaSiteKey
 	if user.MultiSigAddress == "" {
 		c.Env["ShowInstructions"] = true
 	}
-	if controller.smtpHost == "" {
-		c.Env["SMTPDisabled"] = true
-	}
+	c.Env["CaptchaID"] = captcha.New()
 
+	t := controller.GetTemplate(c)
 	widgets := controller.Parse(t, "settings", c.Env)
-	c.Env["Title"] = "Ubiq Decred Stake Pool - Settings"
-	c.Env["Content"] = template.HTML(widgets)
 
+	c.Env["Title"] = "Ubiq Decred Voting Service - Settings"
+	c.Env["Content"] = template.HTML(widgets)
 	return controller.Parse(t, "main", c.Env), http.StatusOK
 }
 
@@ -1601,6 +1600,7 @@ func (controller *MainController) SettingsPost(c web.C, r *http.Request) (string
 	password, updateEmail, updatePassword := r.FormValue("password"),
 		r.FormValue("updateEmail"), r.FormValue("updatePassword")
 
+	// Changes to email or password require the current password.
 	user, err := helpers.PasswordValidById(dbMap, session.Values["UserId"].(int64), password)
 	if err != nil {
 		session.AddFlash("Password not valid", "settingsError")
@@ -1609,23 +1609,16 @@ func (controller *MainController) SettingsPost(c web.C, r *http.Request) (string
 
 	log.Infof("Settings POST from %v, email %v", remoteIP, user.Email)
 
-	if updateEmail == "true" {
+	if updateEmail == "true" || updateEmail == "1" {
 		newEmail := r.FormValue("email")
 		log.Infof("user requested email change from %v to %v", user.Email, newEmail)
 
-		re := recaptcha.R{
-			Secret: controller.recaptchaSecret,
-		}
-
-		isValid := re.Verify(*r)
-		if !isValid {
-			session.AddFlash("Recaptcha error", "settingsError")
-			log.Errorf("Recaptcha error %v", re.LastError())
+		if !controller.IsCaptchaDone(c) {
+			session.AddFlash("You must complete the captcha.", "settingsError")
 			return controller.Settings(c, r)
 		}
 
 		userExists := models.GetUserByEmail(dbMap, newEmail)
-
 		if userExists != nil {
 			session.AddFlash("Email address in use", "settingsError")
 			return controller.Settings(c, r)
@@ -1634,11 +1627,11 @@ func (controller *MainController) SettingsPost(c web.C, r *http.Request) (string
 		t := time.Now()
 		expires := t.Add(time.Hour * 1)
 
-		token := randToken()
+		token := models.NewUserToken()
 		emailChange := &models.EmailChange{
 			UserId:   user.Id,
 			NewEmail: newEmail,
-			Token:    token,
+			Token:    token.String(),
 			Created:  t.Unix(),
 			Expires:  expires.Unix(),
 		}
@@ -1650,16 +1643,16 @@ func (controller *MainController) SettingsPost(c web.C, r *http.Request) (string
 		}
 
 		bodyNew := "A request was made to change the email address\r\n" +
-			"for a stake pool account at " + controller.baseURL + "\r\n" +
+			"for a voting service account at " + controller.baseURL + "\r\n" +
 			"from " + user.Email + " to " + newEmail + "\r\n\n" +
 			"The request was made from IP address " + remoteIP + "\r\n\n" +
 			"If you made this request, follow the link below:\r\n\n" +
-			controller.baseURL + "/emailupdate?t=" + token + "\r\n\n" +
+			controller.baseURL + "/emailupdate?t=" + token.String() + "\r\n\n" +
 			"The above link expires an hour after this email was sent.\r\n\n" +
 			"If you did not make this request, you may safely ignore this " +
 			"email.\r\n" + "However, you may want to look into how this " +
 			"happened.\r\n"
-		err = controller.SendMail(newEmail, "Stake pool email change", bodyNew)
+		err = controller.SendMail(newEmail, "Voting service email change", bodyNew)
 		if err != nil {
 			session.AddFlash("Unable to send email change token.",
 				"settingsError")
@@ -1671,12 +1664,12 @@ func (controller *MainController) SettingsPost(c web.C, r *http.Request) (string
 		}
 
 		bodyOld := "A request was made to change the email address\r\n" +
-			"for your stake pool account at " + controller.baseURL + "\r\n" +
+			"for your voting service account at " + controller.baseURL + "\r\n" +
 			"from " + user.Email + " to " + newEmail + "\r\n\n" +
 			"The request was made from IP address " + remoteIP + "\r\n\n" +
 			"If you did not make this request, please contact the \r\n" +
-			"stake pool administrator immediately.\r\n"
-		err = controller.SendMail(user.Email, "Stake pool email change",
+			"Voting service administrator immediately.\r\n"
+		err = controller.SendMail(user.Email, "Voting service email change",
 			bodyOld)
 		// this likely has the same status as the above email so don't
 		// inform the user.
@@ -1702,11 +1695,11 @@ func (controller *MainController) SettingsPost(c web.C, r *http.Request) (string
 		}
 
 		// send a confirmation email.
-		body := "Your stake pool password for " + controller.baseURL + "\r\n" +
+		body := "Your voting service password for " + controller.baseURL + "\r\n" +
 			"was just changed by IP Address " + remoteIP + "\r\n\n" +
 			"If you did not make this request, please contact the \r\n" +
-			"stake pool administrator immediately.\r\n"
-		err = controller.SendMail(user.Email, "Stake pool password change",
+			"Voting service administrator immediately.\r\n"
+		err = controller.SendMail(user.Email, "Voting service password change",
 			body)
 		if err != nil {
 			log.Errorf("error sending password change confirmation %v %v",
@@ -1775,44 +1768,40 @@ func (controller *MainController) SignInPost(c web.C, r *http.Request) (string, 
 
 // SignUp renders the signup page.
 func (controller *MainController) SignUp(c web.C, r *http.Request) (string, int) {
-	t := controller.GetTemplate(c)
-	session := controller.GetSession(c)
-
 	// Tell main.html what route is being rendered
 	c.Env["IsSignUp"] = true
-	if controller.smtpHost == "" {
-		c.Env["SMTPDisabled"] = true
-	}
 	if controller.closePool {
 		c.Env["IsClosed"] = true
 		c.Env["ClosePoolMsg"] = controller.closePoolMsg
 	}
 
-	c.Env["FlashError"] = session.Flashes("signupError")
+	session := controller.GetSession(c)
+	c.Env["FlashError"] = append(session.Flashes("signupError"), session.Flashes("captchaFailed")...)
 	c.Env["FlashSuccess"] = session.Flashes("signupSuccess")
-	c.Env["RecaptchaSiteKey"] = controller.recaptchaSiteKey
+	c.Env["CaptchaID"] = captcha.New()
 
+	t := controller.GetTemplate(c)
 	widgets := controller.Parse(t, "auth/signup", c.Env)
 
 	c.Env["Title"] = "Ubiq Decred Stake Pool - Sign Up"
 	c.Env["Content"] = template.HTML(widgets)
-
 	return controller.Parse(t, "main", c.Env), http.StatusOK
 }
 
-// SignUpPost form submit route. Registers new user or shows Sign Up route with appropriate
-// messages set in session.
+// SignUpPost form submit route. Registers new user or shows Sign Up route with
+// appropriate messages set in session.
 func (controller *MainController) SignUpPost(c web.C, r *http.Request) (string, int) {
 	if controller.closePool {
 		log.Infof("attempt to signup while registration disabled")
 		return "/error?r=/signup", http.StatusSeeOther
 	}
 
-	re := recaptcha.R{
-		Secret: controller.recaptchaSecret,
+	session := controller.GetSession(c)
+	if !controller.IsCaptchaDone(c) {
+		session.AddFlash("You must complete the captcha.", "signupError")
+		return controller.SignUp(c, r)
 	}
 
-	session := controller.GetSession(c)
 	remoteIP := getClientIP(r, controller.realIPHeader)
 
 	email, password, passwordRepeat := r.FormValue("email"),
@@ -1833,13 +1822,6 @@ func (controller *MainController) SignUpPost(c web.C, r *http.Request) (string, 
 		return controller.SignUp(c, r)
 	}
 
-	isValid := re.Verify(*r)
-	if !isValid {
-		session.AddFlash("Recaptcha error", "signupError")
-		log.Errorf("Recaptcha error %v", re.LastError())
-		return controller.SignUp(c, r)
-	}
-
 	dbMap := controller.GetDbMap(c)
 	user := models.GetUserByEmail(dbMap, email)
 
@@ -1848,11 +1830,11 @@ func (controller *MainController) SignUpPost(c web.C, r *http.Request) (string, 
 		return controller.SignUp(c, r)
 	}
 
-	token := randToken()
+	token := models.NewUserToken()
 	user = &models.User{
 		Username:        email,
 		Email:           email,
-		EmailToken:      token,
+		EmailToken:      token.String(),
 		EmailVerified:   0,
 		VoteBits:        1,
 		VoteBitsVersion: int64(controller.voteVersion),
@@ -1870,7 +1852,7 @@ func (controller *MainController) SignUpPost(c web.C, r *http.Request) (string, 
 	body := signupEmailTemplate
 	body = strings.Replace(body, "__URL__", controller.baseURL, -1)
 	body = strings.Replace(body, "__REMOTEIP__", remoteIP, -1)
-	body = strings.Replace(body, "__TOKEN__", token, -1)
+	body = strings.Replace(body, "__TOKEN__", token.String(), -1)
 
 	err := controller.SendMail(user.Email, signupEmailSubject, body)
 	if err != nil {
@@ -1979,10 +1961,6 @@ func (controller *MainController) Tickets(c web.C, r *http.Request) (string, int
 	var ticketInfoVoted, ticketInfoExpired, ticketInfoMissed []TicketInfoHistoric
 	var numVoted int
 
-	responseHeaderMap := make(map[string]string)
-	c.Env["ResponseHeaderMap"] = responseHeaderMap
-	// map is a reference type so responseHeaderMap may be modified
-
 	t := controller.GetTemplate(c)
 	session := controller.GetSession(c)
 	remoteIP := getClientIP(r, controller.realIPHeader)
@@ -2011,7 +1989,7 @@ func (controller *MainController) Tickets(c web.C, r *http.Request) (string, int
 	// Get P2SH Address
 	multisig, err := dcrutil.DecodeAddress(user.MultiSigAddress)
 	if err != nil {
-		log.Infof("Invalid address %v in database: %v", user.MultiSigAddress, err)
+		log.Warnf("Invalid address %v in database: %v", user.MultiSigAddress, err)
 		return "/error", http.StatusSeeOther
 	}
 
@@ -2026,7 +2004,7 @@ func (controller *MainController) Tickets(c web.C, r *http.Request) (string, int
 	if err != nil {
 		// Render page with message to try again later
 		log.Infof("RPC StakePoolUserInfo failed: %v", err)
-		session.AddFlash("Unable to retrieve stake pool user info", "main")
+		session.AddFlash("Unable to retrieve voting service user info", "main")
 		c.Env["Flash"] = session.Flashes("main")
 		return controller.Parse(t, "main", c.Env), http.StatusInternalServerError
 	}
@@ -2137,7 +2115,7 @@ func (controller *MainController) Voting(c web.C, r *http.Request) (string, int)
 	c.Env["VoteVersion"] = controller.voteVersion
 
 	widgets := controller.Parse(t, "voting", c.Env)
-	c.Env["Title"] = "Decred Stake Pool - Voting"
+	c.Env["Title"] = "Ubiq Decred Voting Service - Voting"
 	c.Env["Content"] = template.HTML(widgets)
 
 	return controller.Parse(t, "main", c.Env), http.StatusOK

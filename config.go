@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2014 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2019 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -15,34 +15,32 @@ import (
 	"strconv"
 	"strings"
 
-	flags "github.com/btcsuite/go-flags"
 	"github.com/decred/dcrd/dcrutil"
+	flags "github.com/jessevdk/go-flags"
 )
 
 const (
-	defaultBaseURL          = "http://127.0.0.1:8000"
-	defaultClosePoolMsg     = "The stake pool is temporarily closed to new signups."
-	defaultConfigFilename   = "dcrstakepool.conf"
-	defaultDataDirname      = "data"
-	defaultLogLevel         = "info"
-	defaultLogDirname       = "logs"
-	defaultLogFilename      = "dcrstakepool.log"
-	defaultCookieSecure     = false
-	defaultDBHost           = "localhost"
-	defaultDBName           = "stakepool"
-	defaultDBPort           = "3306"
-	defaultDBUser           = "stakepool"
-	defaultListen           = ":8000"
-	defaultPoolEmail        = "admin@example.com"
-	defaultPoolFees         = 7.5
-	defaultPoolLink         = "https://forum.decred.org/threads/rfp-6-setup-and-operate-10-stake-pools.1361/"
-	defaultPublicPath       = "public"
-	defaultTemplatePath     = "views"
-	defaultRecaptchaSecret  = "6LeIxAcTAAAAAGG-vFI1TnRWxMZNFuojJ4WifJWe"
-	defaultRecaptchaSitekey = "6LeIxAcTAAAAAJcZVRqyHh71UMIEGNQ_MXjiZKhI"
-	defaultSMTPHost         = ""
-	defaultMinServers       = 2
-	defaultMaxVotedAge      = 8640
+	defaultBaseURL        = "http://127.0.0.1:8000"
+	defaultClosePoolMsg   = "The voting service is temporarily closed to new signups."
+	defaultConfigFilename = "dcrstakepool.conf"
+	defaultDataDirname    = "data"
+	defaultLogLevel       = "info"
+	defaultLogDirname     = "logs"
+	defaultLogFilename    = "dcrstakepool.log"
+	defaultCookieSecure   = false
+	defaultDBHost         = "localhost"
+	defaultDBName         = "stakepool"
+	defaultDBPort         = "3306"
+	defaultDBUser         = "stakepool"
+	defaultListen         = ":8000"
+	defaultPoolEmail      = "admin@example.com"
+	defaultPoolFees       = 7.5
+	defaultPoolLink       = "https://forum.decred.org/threads/rfp-6-setup-and-operate-10-stake-pools.1361/"
+	defaultPublicPath     = "public"
+	defaultTemplatePath   = "views"
+	defaultSMTPHost       = ""
+	defaultMinServers     = 2
+	defaultMaxVotedAge    = 8640
 )
 
 var (
@@ -73,9 +71,9 @@ type config struct {
 	DebugLevel         string   `short:"d" long:"debuglevel" description:"Logging level for all subsystems {trace, debug, info, warn, error, critical} -- You may also specify <subsystem>=<level>,<subsystem2>=<level>,... to set the log level for individual subsystems -- Use show to list available subsystems"`
 	APISecret          string   `long:"apisecret" description:"Secret string used to encrypt API tokens."`
 	BaseURL            string   `long:"baseurl" description:"BaseURL to use when sending links via email"`
-	ColdWalletExtPub   string   `long:"coldwalletextpub" description:"The extended public key to send user stake pool fees to"`
+	ColdWalletExtPub   string   `long:"coldwalletextpub" description:"The extended public key for addresses to which voting service user fees are sent."`
 	ClosePool          bool     `long:"closepool" description:"Disable user registration actions (sign-ups and submitting addresses)"`
-	ClosePoolMsg       string   `long:"closepoolmsg" description:"Message to display when closepool is set (default: Stake pool is currently oversubscribed)"`
+	ClosePoolMsg       string   `long:"closepoolmsg" description:"Message to display when closepool is set."`
 	CookieSecret       string   `long:"cookiesecret" description:"Secret string used to encrypt session data."`
 	CookieSecure       bool     `long:"cookiesecure" description:"Set whether cookies can be sent in clear text or not."`
 	DBHost             string   `long:"dbhost" description:"Hostname for database connection"`
@@ -85,8 +83,6 @@ type config struct {
 	DBName             string   `long:"dbname" description:"Name of database"`
 	PublicPath         string   `long:"publicpath" description:"Path to the public folder which contains css/fonts/images/javascript."`
 	TemplatePath       string   `long:"templatepath" description:"Path to the views folder which contains html files."`
-	RecaptchaSecret    string   `long:"recaptchasecret" description:"Recaptcha Secret"`
-	RecaptchaSitekey   string   `long:"recaptchasitekey" description:"Recaptcha Sitekey"`
 	PoolEmail          string   `long:"poolemail" description:"Email address to for support inquiries"`
 	PoolFees           float64  `long:"poolfees" description:"The per-ticket fees the user must send to the pool with their tickets"`
 	PoolLink           string   `long:"poollink" description:"URL for support inquiries such as forum, IRC, etc"`
@@ -282,30 +278,28 @@ func newConfigParser(cfg *config, so *serviceOptions, options flags.Options) *fl
 func loadConfig() (*config, []string, error) {
 	// Default config.
 	cfg := config{
-		BaseURL:          defaultBaseURL,
-		ClosePool:        false,
-		ClosePoolMsg:     defaultClosePoolMsg,
-		ConfigFile:       defaultConfigFile,
-		DebugLevel:       defaultLogLevel,
-		DataDir:          defaultDataDir,
-		LogDir:           defaultLogDir,
-		CookieSecure:     defaultCookieSecure,
-		DBHost:           defaultDBHost,
-		DBName:           defaultDBName,
-		DBPort:           defaultDBPort,
-		DBUser:           defaultDBUser,
-		Listen:           defaultListen,
-		PoolEmail:        defaultPoolEmail,
-		PoolFees:         defaultPoolFees,
-		PoolLink:         defaultPoolLink,
-		PublicPath:       defaultPublicPath,
-		TemplatePath:     defaultTemplatePath,
-		RecaptchaSecret:  defaultRecaptchaSecret,
-		RecaptchaSitekey: defaultRecaptchaSitekey,
-		SMTPHost:         defaultSMTPHost,
-		Version:          version(),
-		MinServers:       defaultMinServers,
-		MaxVotedAge:      defaultMaxVotedAge,
+		BaseURL:      defaultBaseURL,
+		ClosePool:    false,
+		ClosePoolMsg: defaultClosePoolMsg,
+		ConfigFile:   defaultConfigFile,
+		DebugLevel:   defaultLogLevel,
+		DataDir:      defaultDataDir,
+		LogDir:       defaultLogDir,
+		CookieSecure: defaultCookieSecure,
+		DBHost:       defaultDBHost,
+		DBName:       defaultDBName,
+		DBPort:       defaultDBPort,
+		DBUser:       defaultDBUser,
+		Listen:       defaultListen,
+		PoolEmail:    defaultPoolEmail,
+		PoolFees:     defaultPoolFees,
+		PoolLink:     defaultPoolLink,
+		PublicPath:   defaultPublicPath,
+		TemplatePath: defaultTemplatePath,
+		SMTPHost:     defaultSMTPHost,
+		Version:      version(),
+		MinServers:   defaultMinServers,
+		MaxVotedAge:  defaultMaxVotedAge,
 	}
 
 	// Service options which are only added on Windows.
@@ -400,7 +394,7 @@ func loadConfig() (*config, []string, error) {
 	activeNetParams = &mainNetParams
 	if cfg.TestNet {
 		numNets++
-		activeNetParams = &testNet2Params
+		activeNetParams = &testNet3Params
 	}
 	if cfg.SimNet {
 		numNets++

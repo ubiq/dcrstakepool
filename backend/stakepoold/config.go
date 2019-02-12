@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2014 The btcsuite developers
-// Copyright (c) 2015-2016 The Decred developers
+// Copyright (c) 2015-2019 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -15,8 +15,8 @@ import (
 	"strconv"
 	"strings"
 
-	flags "github.com/btcsuite/go-flags"
 	"github.com/decred/dcrd/dcrutil"
+	flags "github.com/jessevdk/go-flags"
 )
 
 const (
@@ -60,8 +60,8 @@ type config struct {
 	CPUProfile       string  `long:"cpuprofile" description:"Write CPU profile to the specified file"`
 	MemProfile       string  `long:"memprofile" description:"Write mem profile to the specified file"`
 	DebugLevel       string  `short:"d" long:"debuglevel" description:"Logging level for all subsystems {trace, debug, info, warn, error, critical} -- You may also specify <subsystem>=<level>,<subsystem2>=<level>,... to set the log level for individual subsystems -- Use show to list available subsystems"`
-	ColdWalletExtPub string  `long:"coldwalletextpub" description:"The extended public key to send user stake pool fees to"`
-	PoolFees         float64 `long:"poolfees" description:"The per-ticket fees the user must send to the pool with their tickets"`
+	ColdWalletExtPub string  `long:"coldwalletextpub" description:"The extended public key for addresses to which voting service user fees are sent."`
+	PoolFees         float64 `long:"poolfees" description:"The per-ticket fees the user must send to the voting service with their tickets"`
 	DBHost           string  `long:"dbhost" description:"Hostname for database connection"`
 	DBUser           string  `long:"dbuser" description:"Username for database connection"`
 	DBPassword       string  `long:"dbpassword" description:"Password for database connection"`
@@ -391,7 +391,7 @@ func loadConfig() (*config, []string, error) {
 	activeNetParams = &mainNetParams
 	if cfg.TestNet {
 		numNets++
-		activeNetParams = &testNet2Params
+		activeNetParams = &testNet3Params
 	}
 	if cfg.SimNet {
 		numNets++

@@ -1,15 +1,89 @@
+// Copyright (c) 2016-2019 The Decred developers
+// Use of this source code is governed by an ISC
+// license that can be found in the LICENSE file.
+
 package models
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"time"
 
-	"github.com/dgrijalva/jwt-go"
+	"github.com/decred/dcrd/chaincfg/chainhash"
+	jwt "github.com/dgrijalva/jwt-go"
 	"github.com/go-gorp/gorp"
 	_ "github.com/go-sql-driver/mysql"
 	"golang.org/x/crypto/bcrypt"
 )
+
+// HashList represents a slice of hash strings.
+type HashList []string
+
+// DecodeHashList attempts to decode each hash string in the given HashList,
+// returning a non-nil error if any string in the list is not a valid hashes.
+func DecodeHashList(hashList HashList) ([]chainhash.Hash, error) {
+	var hashes []chainhash.Hash
+	for i := range hashList {
+		h, err := chainhash.NewHashFromStr(hashList[i])
+		if err != nil {
+			return nil, err
+		}
+		hashes = append(hashes, *h)
+	}
+	return hashes, nil
+}
+
+// ValidateHashList ensures that all strings in the HashList are valid Decred
+// hashes. If all are valid, the returned error will be nil.
+func ValidateHashList(hashList HashList) error {
+	_, err := DecodeHashList(hashList)
+	return err
+}
+
+// ToStringSlice satisfies gorp's internal "stringer" interface used by
+// expandSliceArgs. It is a trivial conversion since the underlying type of
+// HashList is a []string, but if a HashList is provided to a gorp
+// query/transaction then ToStringSlice must be implemented to obtain the
+// []string type in expandSliceArgs.
+func (hashList HashList) ToStringSlice() []string {
+	return hashList // []string(hashList)
+}
+
+const userTokenSize = 16
+
+// UserToken is a token used in user registration, and email and password
+// changes.
+type UserToken [userTokenSize]byte
+
+// String returns the hexadecimal encoding of the token bytes.
+func (ut UserToken) String() string {
+	return hex.EncodeToString(ut[:])
+}
+
+// NewUserToken creates a new random UserToken.
+func NewUserToken() (ut UserToken) {
+	rand.Read(ut[:])
+	return
+}
+
+// UserTokenFromStr attempts to decode the token string into a UserToken.
+func UserTokenFromStr(token string) (UserToken, error) {
+	var ut UserToken
+	b, err := hex.DecodeString(token)
+	if err != nil {
+		return ut, err
+	}
+
+	if len(b) != userTokenSize {
+		return ut, fmt.Errorf("token length incorrect: expected %d, got %d",
+			userTokenSize, len(b))
+	}
+
+	copy(ut[:], b)
+	return ut, nil
+}
 
 type EmailChange struct {
 	Id       int64 `db:"EmailChangeID"`
@@ -220,39 +294,43 @@ func GetVotableLowFeeTickets(dbMap *gorp.DbMap) ([]LowFeeTicket, error) {
 }
 
 func GetDbMap(APISecret, baseURL, user, password, hostname, port, database string) *gorp.DbMap {
-	// connect to db using standard Go database/sql API
-	// use whatever database/sql driver you wish
-	db, err := sql.Open("mysql", fmt.Sprint(user, ":", password, "@(", hostname, ":", port, ")/", database, "?charset=utf8mb4"))
+	// Connect to db using standard Go database/sql API.
+	dataSource := fmt.Sprintf("%s:%s@(%s:%s)/%s?charset=utf8mb4",
+		user, password, hostname, port, database)
+	db, err := sql.Open("mysql", dataSource)
 	if err != nil {
 		log.Critical("sql.Open failed: ", err)
 		return nil
 	}
 
-	// sql.Open just validates its arguments without creating a connection
-	// Verify that the data source name is valid with Ping:
+	// sql.Open just validates its arguments without creating a connection, so
+	// verify that the data source name is valid with Ping.
 	if err = db.Ping(); err != nil {
 		log.Critical("Unable to establish connection to database: ", err)
 		return nil
 	}
 
-	// construct a gorp DbMap
-	dbMap := &gorp.DbMap{Db: db, Dialect: gorp.MySQLDialect{Engine: "InnoDB", Encoding: "UTF8MB4"}}
+	// Construct a gorp DbMap.
+	dbMap := &gorp.DbMap{
+		Db:              db,
+		Dialect:         gorp.MySQLDialect{Engine: "InnoDB", Encoding: "UTF8MB4"},
+		ExpandSliceArgs: true,
+	}
 
-	// add a table, setting the table name and specifying that
-	// the Id property is an auto incrementing primary key
+	// Add a table, setting the table name and specifying that the Id property
+	// is an auto incrementing primary key
 	dbMap.AddTableWithName(EmailChange{}, "EmailChange").SetKeys(true, "Id")
 	dbMap.AddTableWithName(LowFeeTicket{}, "LowFeeTicket").SetKeys(true, "Id")
 	dbMap.AddTableWithName(PasswordReset{}, "PasswordReset").SetKeys(true, "Id")
-	dbMap.AddTableWithName(User{}, "Users").SetKeys(true, "Id")
+	usersTableName := "Users"
+	dbMap.AddTableWithName(User{}, usersTableName).SetKeys(true, "Id")
 
-	// create the table. in a production system you'd generally
-	// use a migration tool, or create the tables via scripts
+	// Create the table.
 	err = dbMap.CreateTablesIfNotExists()
 	if err != nil {
 		log.Critical("Create tables failed: ", err)
-		// There is no point proceeding, so return. TODO: signal to caller the
-		// error, or possibly close the db, or panic.
-		return dbMap
+		// There is no point proceeding, so return with nil.
+		return nil
 	}
 
 	// The ORM, Gorp, doesn't support migrations so we just add new columns
@@ -266,7 +344,7 @@ func GetDbMap(APISecret, baseURL, user, password, hostname, port, database strin
 	// April 1st 2016.  The last mainnet block on Mar 31st of 15346 is used
 	// as a safe default to ensure no tickets are missed. This could be
 	// adjusted upwards since most pools were on testnet for a long time.
-	addColumn(dbMap, database, "Users", "HeightRegistered", "bigint(20) NULL",
+	AddColumn(dbMap, database, usersTableName, "HeightRegistered", "bigint(20) NULL",
 		"UserFeeAddr",
 		"UPDATE Users SET HeightRegistered = 15346 WHERE MultiSigAddress <> ''")
 
@@ -283,11 +361,11 @@ func GetDbMap(APISecret, baseURL, user, password, hostname, port, database strin
 	// add EmailVerified, EmailToken so new users' email addresses can be
 	// verified.  We consider users who already registered to be grandfathered
 	// in and use 2 to reflect that.  1 is verified, 0 is unverified.
-	addColumn(dbMap, database, "Users", "EmailVerified", "bigint(20) NULL",
+	AddColumn(dbMap, database, usersTableName, "EmailVerified", "bigint(20) NULL",
 		"HeightRegistered",
 		"UPDATE Users SET EmailVerified = 2")
 	// Set an empty token for grandfathered accounts
-	addColumn(dbMap, database, "Users", "EmailToken", "varchar(255) NULL",
+	AddColumn(dbMap, database, usersTableName, "EmailToken", "varchar(255) NULL",
 		"EmailVerified",
 		"UPDATE Users SET EmailToken = ''")
 
@@ -295,7 +373,7 @@ func GetDbMap(APISecret, baseURL, user, password, hostname, port, database strin
 
 	// add APIToken column for storing a token that users may use to submit a
 	// public key address and retrieve ticket purchasing information via the API
-	addColumn(dbMap, database, "Users", "APIToken", "varchar(255) NULL",
+	AddColumn(dbMap, database, usersTableName, "APIToken", "varchar(255) NULL",
 		"EmailToken", "UPDATE Users SET APIToken = ''")
 
 	// Set an API token for all users who have verified their email address
@@ -319,18 +397,18 @@ func GetDbMap(APISecret, baseURL, user, password, hostname, port, database strin
 
 	// add VoteBits column for storing the user's voting preferences.  Set the
 	// default to 1 which means the previous block was valid
-	addColumn(dbMap, database, "Users", "VoteBits", "bigint(20) NULL", "APIToken", "UPDATE Users SET VoteBits = 1")
+	AddColumn(dbMap, database, usersTableName, "VoteBits", "bigint(20) NULL", "APIToken", "UPDATE Users SET VoteBits = 1")
 
 	// add VoteBitsVersion column for storing the vote version that the VoteBits
 	// are set for.  The default is 3 since that is the current version on mainnet
 	// and it will be upgraded when talking to stakepoold
-	addColumn(dbMap, database, "Users", "VoteBitsVersion", "bigint(20) NULL", "VoteBits", "UPDATE Users SET VoteBitsVersion = 3")
+	AddColumn(dbMap, database, usersTableName, "VoteBitsVersion", "bigint(20) NULL", "VoteBits", "UPDATE Users SET VoteBitsVersion = 3")
 
 	return dbMap
 }
 
-// addColumn checks if a column exists and adds it if it doesn't
-func addColumn(dbMap *gorp.DbMap, db string, table string, columnToAdd string,
+// AddColumn checks if a column exists and adds it if it doesn't
+func AddColumn(dbMap *gorp.DbMap, db string, table string, columnToAdd string,
 	dataSpec string, colAfter string, defaultQry string) {
 	s, err := dbMap.SelectStr("SELECT column_name FROM " +
 		"information_schema.columns WHERE table_schema = '" + db +
