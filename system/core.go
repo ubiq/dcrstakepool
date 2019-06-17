@@ -20,27 +20,12 @@ import (
 	"google.golang.org/grpc/codes"
 )
 
-// CSRF token constants
-const (
-	CSRFCookie = "XSRF-TOKEN"
-	CSRFHeader = "X-XSRF-TOKEN"
-	CSRFKey    = "csrf_token"
-)
-
 type Application struct {
-	APISecret      string
-	Template       *template.Template
-	TemplatesPath  string
-	Store          *sessions.CookieStore
-	DbMap          *gorp.DbMap
-	CsrfProtection *CsrfProtection
-}
-
-type CsrfProtection struct {
-	Key    string
-	Cookie string
-	Header string
-	Secure bool
+	APISecret     string
+	Template      *template.Template
+	TemplatesPath string
+	Store         *sessions.CookieStore
+	DbMap         *gorp.DbMap
 }
 
 // GojiWebHandlerFunc is an adaptor that allows an http.HanderFunc where a
@@ -73,13 +58,6 @@ func (application *Application) Init(APISecret string, baseURL string,
 		DBHost,
 		DBPort,
 		DBName)
-
-	application.CsrfProtection = &CsrfProtection{
-		Key:    CSRFKey,
-		Cookie: CSRFCookie,
-		Header: CSRFHeader,
-		Secure: cookieSecure,
-	}
 
 	application.APISecret = APISecret
 }
@@ -139,6 +117,9 @@ func (application *Application) Route(controller interface{}, route string) web.
 
 		switch code {
 		case http.StatusOK, http.StatusProcessing, http.StatusServiceUnavailable:
+			if r.URL.Path != "/" && r.URL.Path != "/stats" {
+				w.Header().Set("Cache-Control", "private,no-store,no-cache")
+			}
 			if _, exists := c.Env["Content-Type"]; exists {
 				w.Header().Set("Content-Type", c.Env["Content-Type"].(string))
 			}
@@ -147,9 +128,11 @@ func (application *Application) Route(controller interface{}, route string) web.
 		case http.StatusSeeOther, http.StatusFound:
 			http.Redirect(w, r, body, code)
 		case http.StatusUnauthorized:
-			http.Error(w, http.StatusText(403), 403)
+			http.Error(w, http.StatusText(http.StatusForbidden),
+				http.StatusForbidden)
 		case http.StatusInternalServerError:
-			http.Error(w, http.StatusText(500), 500)
+			http.Error(w, http.StatusText(http.StatusInternalServerError),
+				http.StatusInternalServerError)
 		}
 	}
 }
@@ -158,7 +141,7 @@ func saveSession(c web.C, w http.ResponseWriter, r *http.Request) error {
 	if session, exists := c.Env["Session"]; exists {
 		return session.(*sessions.Session).Save(r, w)
 	}
-	return errors.New("Session not available")
+	return errors.New("session not available")
 }
 
 // APIHandler executes an API processing function that provides an *APIResponse
@@ -167,10 +150,6 @@ func saveSession(c web.C, w http.ResponseWriter, r *http.Request) error {
 func (application *Application) APIHandler(apiFun func(web.C, *http.Request) *APIResponse) web.HandlerFunc {
 	return func(c web.C, w http.ResponseWriter, r *http.Request) {
 		apiResp := apiFun(c, r)
-
-		if err := saveSession(c, w, r); err != nil {
-			log.Errorf("Can't save session: %v", err)
-		}
 
 		if apiResp != nil {
 			WriteAPIResponse(apiResp, http.StatusOK, w)

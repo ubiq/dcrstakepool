@@ -15,32 +15,37 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/decred/dcrd/chaincfg"
 	"github.com/decred/dcrd/dcrutil"
+	"github.com/decred/dcrd/hdkeychain"
+	"github.com/decred/dcrstakepool/internal/version"
 	flags "github.com/jessevdk/go-flags"
 )
 
 const (
-	defaultBaseURL        = "http://127.0.0.1:8000"
-	defaultClosePoolMsg   = "The voting service is temporarily closed to new signups."
-	defaultConfigFilename = "dcrstakepool.conf"
-	defaultDataDirname    = "data"
-	defaultLogLevel       = "info"
-	defaultLogDirname     = "logs"
-	defaultLogFilename    = "dcrstakepool.log"
-	defaultCookieSecure   = false
-	defaultDBHost         = "localhost"
-	defaultDBName         = "stakepool"
-	defaultDBPort         = "3306"
-	defaultDBUser         = "stakepool"
-	defaultListen         = ":8000"
-	defaultPoolEmail      = "admin@example.com"
-	defaultPoolFees       = 7.5
-	defaultPoolLink       = "https://forum.decred.org/threads/rfp-6-setup-and-operate-10-stake-pools.1361/"
-	defaultPublicPath     = "public"
-	defaultTemplatePath   = "views"
-	defaultSMTPHost       = ""
-	defaultMinServers     = 2
-	defaultMaxVotedAge    = 8640
+	defaultBaseURL         = "http://127.0.0.1:8000"
+	defaultClosePoolMsg    = "The voting service is temporarily closed to new signups."
+	defaultConfigFilename  = "dcrstakepool.conf"
+	defaultDataDirname     = "data"
+	defaultLogLevel        = "info"
+	defaultLogDirname      = "logs"
+	defaultLogFilename     = "dcrstakepool.log"
+	defaultCookieSecure    = false
+	defaultDBHost          = "localhost"
+	defaultDBName          = "stakepool"
+	defaultDBPort          = "3306"
+	defaultDBUser          = "stakepool"
+	defaultListen          = ":8000"
+	defaultPoolEmail       = "admin@example.com"
+	defaultPoolFees        = 7.5
+	defaultPoolLink        = "https://forum.decred.org/threads/rfp-6-setup-and-operate-10-stake-pools.1361/"
+	defaultPublicPath      = "public"
+	defaultTemplatePath    = "views"
+	defaultSMTPHost        = ""
+	defaultMinServers      = 2
+	defaultMaxVotedTickets = 1000
+	defaultDescription     = ""
+	defaultDesignation     = ""
 )
 
 var (
@@ -48,6 +53,8 @@ var (
 	defaultConfigFile   = filepath.Join(dcrstakepoolHomeDir, defaultConfigFilename)
 	defaultDataDir      = filepath.Join(dcrstakepoolHomeDir, defaultDataDirname)
 	defaultLogDir       = filepath.Join(dcrstakepoolHomeDir, defaultLogDirname)
+	coldWalletFeeKey    *hdkeychain.ExtendedKey
+	votingWalletVoteKey *hdkeychain.ExtendedKey
 )
 
 // runServiceCommand is only set to a real function on Windows.  It is used
@@ -91,19 +98,22 @@ type config struct {
 	SMTPHost           string   `long:"smtphost" description:"SMTP hostname/ip and port, e.g. mail.example.com:25"`
 	SMTPUsername       string   `long:"smtpusername" description:"SMTP username for authentication if required"`
 	SMTPPassword       string   `long:"smtppassword" description:"SMTP password for authentication if required"`
+	UseSMTPS           bool     `long:"usesmtps" description:"Connect to the SMTP server using smtps."`
 	StakepooldHosts    []string `long:"stakepooldhosts" description:"Hostnames for stakepoold servers"`
 	StakepooldCerts    []string `long:"stakepooldcerts" description:"Certificate paths for stakepoold servers"`
 	WalletHosts        []string `long:"wallethosts" description:"Hostnames for wallet servers"`
 	WalletUsers        []string `long:"walletusers" description:"Usernames for wallet servers"`
 	WalletPasswords    []string `long:"walletpasswords" description:"Passwords for wallet servers"`
 	WalletCerts        []string `long:"walletcerts" description:"Certificate paths for wallet servers"`
-	Version            string
 	VotingWalletExtPub string   `long:"votingwalletextpub" description:"The extended public key of the default account of the voting wallet"`
 	AdminIPs           []string `long:"adminips" description:"Expected admin host"`
 	AdminUserIDs       []string `long:"adminuserids" description:"User IDs of users who are allowed to access administrative functions."`
 	MinServers         int      `long:"minservers" description:"Minimum number of wallets connected needed to avoid errors"`
-	EnableStakepoold   bool     `long:"enablestakepoold" description:"Enable communication with stakepoold"`
-	MaxVotedAge        int64    `long:"maxvotedage" description:"Maximum vote age (blocks since vote) to include in voted tickets table"`
+	EnableStakepoold   bool     `long:"enablestakepoold" description:"Deprecated: Do not use. Stakepoold is required."`
+	MaxVotedAge        int64    `long:"maxvotedage" description:"Deprecated: Use maxvotedtickets instead"`
+	MaxVotedTickets    int      `long:"maxvotedtickets" description:"Maximum number of voted tickets to show on tickets page."`
+	Description        string   `long:"description" description:"Operators own description of their VSP"`
+	Designation        string   `long:"designation" description:"VSP designation (eg. Alpha, Bravo, etc)"`
 }
 
 // serviceOptions defines the configuration options for the daemon as a service
@@ -254,6 +264,28 @@ func fileExists(name string) bool {
 	return true
 }
 
+// validate pub vote and fee keys as belonging to the network
+func (c *config) parsePubKeys(params *chaincfg.Params) error {
+	// Parse the extended public key and the pool fees.
+	var err error
+	coldWalletFeeKey, err = hdkeychain.NewKeyFromString(c.ColdWalletExtPub)
+	if err != nil {
+		return fmt.Errorf("cold wallet extended public key: %v", err)
+	}
+	if !coldWalletFeeKey.IsForNet(params) {
+		return fmt.Errorf("cold wallet extended public key is for wrong network")
+	}
+	// Parse the extended public key for the voting addresses.
+	votingWalletVoteKey, err = hdkeychain.NewKeyFromString(c.VotingWalletExtPub)
+	if err != nil {
+		return fmt.Errorf("voting wallet extended public key: %v", err)
+	}
+	if !votingWalletVoteKey.IsForNet(params) {
+		return fmt.Errorf("voting wallet extended public key is for wrong network")
+	}
+	return nil
+}
+
 // newConfigParser returns a new command line flags parser.
 func newConfigParser(cfg *config, so *serviceOptions, options flags.Options) *flags.Parser {
 	parser := flags.NewParser(cfg, options)
@@ -278,28 +310,29 @@ func newConfigParser(cfg *config, so *serviceOptions, options flags.Options) *fl
 func loadConfig() (*config, []string, error) {
 	// Default config.
 	cfg := config{
-		BaseURL:      defaultBaseURL,
-		ClosePool:    false,
-		ClosePoolMsg: defaultClosePoolMsg,
-		ConfigFile:   defaultConfigFile,
-		DebugLevel:   defaultLogLevel,
-		DataDir:      defaultDataDir,
-		LogDir:       defaultLogDir,
-		CookieSecure: defaultCookieSecure,
-		DBHost:       defaultDBHost,
-		DBName:       defaultDBName,
-		DBPort:       defaultDBPort,
-		DBUser:       defaultDBUser,
-		Listen:       defaultListen,
-		PoolEmail:    defaultPoolEmail,
-		PoolFees:     defaultPoolFees,
-		PoolLink:     defaultPoolLink,
-		PublicPath:   defaultPublicPath,
-		TemplatePath: defaultTemplatePath,
-		SMTPHost:     defaultSMTPHost,
-		Version:      version(),
-		MinServers:   defaultMinServers,
-		MaxVotedAge:  defaultMaxVotedAge,
+		BaseURL:         defaultBaseURL,
+		ClosePool:       false,
+		ClosePoolMsg:    defaultClosePoolMsg,
+		ConfigFile:      defaultConfigFile,
+		DebugLevel:      defaultLogLevel,
+		DataDir:         defaultDataDir,
+		LogDir:          defaultLogDir,
+		CookieSecure:    defaultCookieSecure,
+		DBHost:          defaultDBHost,
+		DBName:          defaultDBName,
+		DBPort:          defaultDBPort,
+		DBUser:          defaultDBUser,
+		Listen:          defaultListen,
+		PoolEmail:       defaultPoolEmail,
+		PoolFees:        defaultPoolFees,
+		PoolLink:        defaultPoolLink,
+		PublicPath:      defaultPublicPath,
+		TemplatePath:    defaultTemplatePath,
+		SMTPHost:        defaultSMTPHost,
+		MinServers:      defaultMinServers,
+		MaxVotedTickets: defaultMaxVotedTickets,
+		Description:     defaultDescription,
+		Designation:     defaultDesignation,
 	}
 
 	// Service options which are only added on Windows.
@@ -324,7 +357,8 @@ func loadConfig() (*config, []string, error) {
 	appName = strings.TrimSuffix(appName, filepath.Ext(appName))
 	usageMessage := fmt.Sprintf("Use %s -h to show usage", appName)
 	if preCfg.ShowVersion {
-		fmt.Println(appName, "version", version())
+		fmt.Printf("%s version %s (Go version %s %s/%s)\n", appName,
+			version.String(), runtime.Version(), runtime.GOOS, runtime.GOARCH)
 		os.Exit(0)
 	}
 
@@ -503,6 +537,12 @@ func loadConfig() (*config, []string, error) {
 		return nil, nil, err
 	}
 
+	if err := cfg.parsePubKeys(activeNetParams.Params); err != nil {
+		err := fmt.Errorf("%s: failed to parse extended public keys: %v", funcName, err)
+		fmt.Fprintln(os.Stderr, err)
+		return nil, nil, err
+	}
+
 	if len(cfg.WalletHosts) == 0 {
 		str := "%s: wallethosts is not set in config"
 		err := fmt.Errorf(str, funcName)
@@ -533,6 +573,7 @@ func loadConfig() (*config, []string, error) {
 
 	// Convert comma separated list into a slice
 	cfg.AdminIPs = strings.Split(cfg.AdminIPs[0], ",")
+	cfg.AdminUserIDs = strings.Split(cfg.AdminUserIDs[0], ",")
 	cfg.WalletHosts = strings.Split(cfg.WalletHosts[0], ",")
 	cfg.WalletUsers = strings.Split(cfg.WalletUsers[0], ",")
 	cfg.WalletPasswords = strings.Split(cfg.WalletPasswords[0], ",")
@@ -584,60 +625,69 @@ func loadConfig() (*config, []string, error) {
 		}
 	}
 
-	if cfg.EnableStakepoold {
-		if len(cfg.StakepooldHosts) == 0 {
-			str := "%s: stakepooldhosts is not set in config"
-			err := fmt.Errorf(str, funcName)
-			fmt.Fprintln(os.Stderr, err)
-			return nil, nil, err
-		}
+	if len(cfg.StakepooldHosts) == 0 {
+		str := "%s: stakepooldhosts is not set in config"
+		err := fmt.Errorf(str, funcName)
+		fmt.Fprintln(os.Stderr, err)
+		return nil, nil, err
+	}
 
-		if len(cfg.StakepooldCerts) == 0 {
-			str := "%s: stakepooldcerts is not set in config"
-			err := fmt.Errorf(str, funcName)
-			fmt.Fprintln(os.Stderr, err)
-			return nil, nil, err
-		}
+	if len(cfg.StakepooldCerts) == 0 {
+		str := "%s: stakepooldcerts is not set in config"
+		err := fmt.Errorf(str, funcName)
+		fmt.Fprintln(os.Stderr, err)
+		return nil, nil, err
+	}
 
-		cfg.StakepooldHosts = strings.Split(cfg.StakepooldHosts[0], ",")
-		cfg.StakepooldCerts = strings.Split(cfg.StakepooldCerts[0], ",")
+	cfg.StakepooldHosts = strings.Split(cfg.StakepooldHosts[0], ",")
+	cfg.StakepooldCerts = strings.Split(cfg.StakepooldCerts[0], ",")
 
-		// Add default stakepoold port for the active network if there's
-		// no port specified
-		cfg.StakepooldHosts = normalizeAddresses(cfg.StakepooldHosts,
-			activeNetParams.StakepooldRPCServerPort)
-		if len(cfg.StakepooldHosts) < 2 {
-			str := "%s: you must specify at least 2 stakepooldhosts"
-			err := fmt.Errorf(str, funcName)
-			fmt.Fprintln(os.Stderr, err)
-			return nil, nil, err
-		}
+	// Add default stakepoold port for the active network if there's
+	// no port specified
+	cfg.StakepooldHosts = normalizeAddresses(cfg.StakepooldHosts,
+		activeNetParams.StakepooldRPCServerPort)
+	if len(cfg.StakepooldHosts) < 2 {
+		str := "%s: you must specify at least 2 stakepooldhosts"
+		err := fmt.Errorf(str, funcName)
+		fmt.Fprintln(os.Stderr, err)
+		return nil, nil, err
+	}
 
-		if len(cfg.StakepooldHosts) != len(cfg.StakepooldCerts) {
-			str := "%s: wallet configuration mismatch " +
-				"(stakepooldcerts and stakepooldhosts " +
-				"counts differ)"
-			err := fmt.Errorf(str, funcName)
-			fmt.Fprintln(os.Stderr, err)
-			return nil, nil, err
-		}
+	if len(cfg.StakepooldHosts) != len(cfg.StakepooldCerts) {
+		str := "%s: wallet configuration mismatch " +
+			"(stakepooldcerts and stakepooldhosts " +
+			"counts differ)"
+		err := fmt.Errorf(str, funcName)
+		fmt.Fprintln(os.Stderr, err)
+		return nil, nil, err
+	}
 
-		for idx := range cfg.StakepooldCerts {
-			if !fileExists(cfg.StakepooldCerts[idx]) {
-				path := filepath.Join(dcrstakepoolHomeDir,
-					cfg.StakepooldCerts[idx])
-				if !fileExists(path) {
-					str := "%s: stakepooldcert " +
-						cfg.StakepooldCerts[idx] +
-						" and " + path + " don't exist"
-					err := fmt.Errorf(str, funcName)
-					fmt.Fprintln(os.Stderr, err)
-					return nil, nil, err
-				}
-
-				cfg.StakepooldCerts[idx] = path
+	for idx := range cfg.StakepooldCerts {
+		if !fileExists(cfg.StakepooldCerts[idx]) {
+			path := filepath.Join(dcrstakepoolHomeDir,
+				cfg.StakepooldCerts[idx])
+			if !fileExists(path) {
+				str := "%s: stakepooldcert " +
+					cfg.StakepooldCerts[idx] +
+					" and " + path + " don't exist"
+				err := fmt.Errorf(str, funcName)
+				fmt.Fprintln(os.Stderr, err)
+				return nil, nil, err
 			}
+
+			cfg.StakepooldCerts[idx] = path
 		}
+	}
+
+	// Warn about deprecated config items if they have been set
+	if cfg.EnableStakepoold {
+		str := "%s: Config enablestakepoold is deprecated.  Please remove from your config file"
+		log.Warnf(str, funcName)
+	}
+
+	if cfg.MaxVotedAge != 0 {
+		str := "%s: Config maxVotedAge is deprecated and has no effect. Use maxVotedTickets instead"
+		log.Warnf(str, funcName)
 	}
 
 	// Warn about missing config file only after all other configuration is
