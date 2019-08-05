@@ -653,6 +653,7 @@ func (controller *MainController) Address(c web.C, r *http.Request) (string, int
 
 	c.Env["Admin"], _ = controller.isAdmin(c, r)
 	c.Env["IsAddress"] = true
+	c.Env["PoolFees"] = controller.poolFees
 	c.Env["Network"] = controller.getNetworkName()
 
 	c.Env["Flash"] = session.Flashes("address")
