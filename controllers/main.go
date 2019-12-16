@@ -1196,7 +1196,6 @@ func (controller *MainController) Error(c web.C, r *http.Request) (string, int) 
 	c.Env["Admin"], _ = controller.isAdmin(c, r)
 	c.Env["IsError"] = true
 	c.Env["Title"] = "Ubiq Decred VSP - Error"
-	c.Env["RPCStatus"] = rpcstatus
 	c.Env["RateLimited"] = r.URL.Query().Get("rl")
 
 	widgets := controller.Parse(t, "error", c.Env)
