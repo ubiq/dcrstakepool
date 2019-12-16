@@ -1809,7 +1809,6 @@ func (controller *MainController) Tickets(c web.C, r *http.Request) (string, int
 
 	c.Env["IsTickets"] = true
 	c.Env["Network"] = controller.getNetworkName()
-	c.Env["PoolFees"] = controller.poolFees
 	c.Env["Title"] = "Ubiq Decred VSP - Tickets"
 
 	dbMap := controller.GetDbMap(c)
