@@ -86,18 +86,21 @@ func UserTokenFromStr(token string) (UserToken, error) {
 	return ut, nil
 }
 
+// EmailChange is used for DB responses and holds information related to an
+// email change.
 type EmailChange struct {
-	Id       int64 `db:"EmailChangeID"`
-	UserId   int64
+	ID       int64 `db:"EmailChangeID"`
+	UserID   int64 `db:"UserId"`
 	NewEmail string
 	Token    string
 	Created  int64
 	Expires  int64
 }
 
+// LowFeeTicket is used for DB responses and holds low fee ticket information.
 type LowFeeTicket struct {
-	Id            int64 `db:"LowFeeTicketID"`
-	AddedByUid    int64
+	ID            int64 `db:"LowFeeTicketID"`
+	AddedByUID    int64 `db:"AddedByUid"`
 	TicketAddress string
 	TicketHash    string
 	TicketExpiry  int64
@@ -106,25 +109,30 @@ type LowFeeTicket struct {
 	Expires       int64
 }
 
+// PasswordReset is used for DB responses and holds information related to a
+// password reset.
 type PasswordReset struct {
-	Id      int64 `db:"PasswordResetID"`
-	UserId  int64
+	ID      int64 `db:"PasswordResetID"`
+	UserID  int64 `db:"UserId"`
 	Token   string
 	Created int64
 	Expires int64
 }
 
+// Session is used for DB responses and holds information about a user's login
+// session.
 type Session struct {
-	Id      int64 `db:"SessionID"`
+	ID      int64 `db:"SessionID"`
 	Token   string
 	Data    []byte
-	UserId  int64
+	UserID  int64 `db:"UserId"`
 	Created int64
 	Expires int64
 }
 
+// User is used for DB responses and holds information about a user.
 type User struct {
-	Id               int64 `db:"UserId"`
+	ID               int64 `db:"UserId"`
 	Email            string
 	Username         string
 	Password         []byte
@@ -141,6 +149,7 @@ type User struct {
 	VoteBitsVersion  int64
 }
 
+// HashPassword hashes the passed password string.
 func (user *User) HashPassword(password string) {
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
@@ -150,6 +159,7 @@ func (user *User) HashPassword(password string) {
 	user.Password = hash
 }
 
+// GetUserByEmail is a helper function that returns a user with email.
 func GetUserByEmail(dbMap *gorp.DbMap, email string) (user *User) {
 	err := dbMap.SelectOne(&user, "SELECT * FROM Users where Email = ?", email)
 
@@ -159,7 +169,8 @@ func GetUserByEmail(dbMap *gorp.DbMap, email string) (user *User) {
 	return
 }
 
-func GetUserById(dbMap *gorp.DbMap, id int64) (user *User, err error) {
+// GetUserByID is a helper function that returns a user with id.
+func GetUserByID(dbMap *gorp.DbMap, id int64) (user *User, err error) {
 	err = dbMap.SelectOne(&user, "SELECT * FROM Users WHERE UserId = ?", id)
 
 	if err != nil {
@@ -169,7 +180,7 @@ func GetUserById(dbMap *gorp.DbMap, id int64) (user *User, err error) {
 	return user, nil
 }
 
-// GetUserCount gives a count of all users
+// GetUserCount gives a count of all users.
 func GetUserCount(dbMap *gorp.DbMap) int64 {
 	userCount, err := dbMap.SelectInt("SELECT COUNT(*) FROM Users")
 	if err != nil {
@@ -179,7 +190,7 @@ func GetUserCount(dbMap *gorp.DbMap) int64 {
 	return userCount
 }
 
-// GetUserMax gives the last userid
+// GetUserMax gives the last userid.
 func GetUserMax(dbMap *gorp.DbMap) int64 {
 	maxUserID, err := dbMap.SelectInt("SELECT MAX(Userid) FROM Users")
 	if err != nil {
@@ -189,7 +200,7 @@ func GetUserMax(dbMap *gorp.DbMap) int64 {
 	return maxUserID
 }
 
-// GetUserCountActive gives a count of all users who have submitted an address
+// GetUserCountActive gives a count of all users who have submitted an address.
 func GetUserCountActive(dbMap *gorp.DbMap) int64 {
 	userCountActive, err := dbMap.SelectInt("SELECT COUNT(*) FROM Users " +
 		"WHERE MultiSigAddress <> ''")
@@ -200,20 +211,22 @@ func GetUserCountActive(dbMap *gorp.DbMap) int64 {
 	return userCountActive
 }
 
+// InsertEmailChange inserts a new EmailChange row into the DB.
 func InsertEmailChange(dbMap *gorp.DbMap, emailChange *EmailChange) error {
 	return dbMap.Insert(emailChange)
 }
 
-// InsertLowFeeTicket inserts a user into the DB
+// InsertLowFeeTicket inserts a low fee ticket into the DB.
 func InsertLowFeeTicket(dbMap *gorp.DbMap, lowFeeTicket *LowFeeTicket) error {
 	return dbMap.Insert(lowFeeTicket)
 }
 
-// InsertUser inserts a user into the DB
+// InsertUser inserts a user into the DB.
 func InsertUser(dbMap *gorp.DbMap, user *User) error {
 	return dbMap.Insert(user)
 }
 
+// InsertPasswordReset inserts a new PasswordReset row into the DB.
 func InsertPasswordReset(dbMap *gorp.DbMap, passwordReset *PasswordReset) error {
 	return dbMap.Insert(passwordReset)
 }
@@ -276,15 +289,17 @@ func UpdateUserByID(dbMap *gorp.DbMap, id int64, multiSigAddr string,
 	return
 }
 
+// GetAllCurrentMultiSigScripts returns all tracked multisig scripts.
 func GetAllCurrentMultiSigScripts(dbMap *gorp.DbMap) ([]User, error) {
 	var multiSigs []User
-	_, err := dbMap.Select(&multiSigs, "SELECT MultiSigScript, HeightRegistered FROM Users WHERE MultiSigAddress <> ''")
+	_, err := dbMap.Select(&multiSigs, "SELECT MultiSigAddress, MultiSigScript, HeightRegistered FROM Users WHERE MultiSigAddress <> ''")
 	if err != nil {
 		return nil, err
 	}
 	return multiSigs, nil
 }
 
+// GetVotableLowFeeTickets returns all unexpired LowFeeTickets.
 func GetVotableLowFeeTickets(dbMap *gorp.DbMap) ([]LowFeeTicket, error) {
 	var votableLowFeeTickets []LowFeeTicket
 	_, err := dbMap.Select(&votableLowFeeTickets, "SELECT * FROM LowFeeTicket WHERE Voted = 0 AND Expires > UNIX_TIMESTAMP()")
@@ -294,21 +309,22 @@ func GetVotableLowFeeTickets(dbMap *gorp.DbMap) ([]LowFeeTicket, error) {
 	return votableLowFeeTickets, nil
 }
 
-func GetDbMap(APISecret, baseURL, user, password, hostname, port, database string) *gorp.DbMap {
+// GetDbMap returns the entire gorp DbMap. It creates tables where none are
+// found and updates values when needed.
+func GetDbMap(APISecret, baseURL, user, password, hostname, port, database string) (*gorp.DbMap, error) {
 	// Connect to db using standard Go database/sql API.
 	dataSource := fmt.Sprintf("%s:%s@(%s:%s)/%s?charset=utf8mb4",
 		user, password, hostname, port, database)
 	db, err := sql.Open("mysql", dataSource)
 	if err != nil {
-		log.Critical("sql.Open failed: ", err)
-		return nil
+		return nil, fmt.Errorf("failed to connect to database: %v", err)
 	}
 
 	// sql.Open just validates its arguments without creating a connection, so
 	// verify that the data source name is valid with Ping.
 	if err = db.Ping(); err != nil {
-		log.Critical("Unable to establish connection to database: ", err)
-		return nil
+		db.Close()
+		return nil, fmt.Errorf("failed to ping database server: %v", err)
 	}
 
 	// Construct a gorp DbMap.
@@ -320,19 +336,18 @@ func GetDbMap(APISecret, baseURL, user, password, hostname, port, database strin
 
 	// Add a table, setting the table name and specifying that the Id property
 	// is an auto incrementing primary key
-	dbMap.AddTableWithName(EmailChange{}, "EmailChange").SetKeys(true, "Id")
-	dbMap.AddTableWithName(LowFeeTicket{}, "LowFeeTicket").SetKeys(true, "Id")
-	dbMap.AddTableWithName(PasswordReset{}, "PasswordReset").SetKeys(true, "Id")
-	dbMap.AddTableWithName(Session{}, "Session").SetKeys(true, "Id")
+	dbMap.AddTableWithName(EmailChange{}, "EmailChange").SetKeys(true, "ID")
+	dbMap.AddTableWithName(LowFeeTicket{}, "LowFeeTicket").SetKeys(true, "ID")
+	dbMap.AddTableWithName(PasswordReset{}, "PasswordReset").SetKeys(true, "ID")
+	dbMap.AddTableWithName(Session{}, "Session").SetKeys(true, "ID")
 	usersTableName := "Users"
-	dbMap.AddTableWithName(User{}, usersTableName).SetKeys(true, "Id")
+	dbMap.AddTableWithName(User{}, usersTableName).SetKeys(true, "ID")
 
 	// Create the table.
 	err = dbMap.CreateTablesIfNotExists()
 	if err != nil {
-		log.Critical("Create tables failed: ", err)
-		// There is no point proceeding, so return with nil.
-		return nil
+		db.Close()
+		return nil, fmt.Errorf("failed to create tables: %v", err)
 	}
 
 	// The ORM, Gorp, doesn't support migrations so we just add new columns
@@ -383,15 +398,14 @@ func GetDbMap(APISecret, baseURL, user, password, hostname, port, database strin
 	var users []User
 	_, err = dbMap.Select(&users, "SELECT * FROM Users WHERE APIToken = '' AND EmailVerified > 0")
 	if err != nil {
-		log.Critical("Select verified users failed: ", err)
-		// With out a Valid []Users, we cannot proceed
-		return dbMap
+		db.Close()
+		return nil, fmt.Errorf("failed to select verified users: %v", err)
 	}
 
 	for _, u := range users {
-		_, err := SetUserAPIToken(dbMap, APISecret, baseURL, u.Id)
+		_, err := SetUserAPIToken(dbMap, APISecret, baseURL, u.ID)
 		if err != nil {
-			log.Errorf("Unable to set API Token for UserId %v: %v", u.Id, err)
+			log.Errorf("Unable to set API Token for UserId %v: %v", u.ID, err)
 		}
 	}
 
@@ -406,7 +420,7 @@ func GetDbMap(APISecret, baseURL, user, password, hostname, port, database strin
 	// and it will be upgraded when talking to stakepoold
 	AddColumn(dbMap, database, usersTableName, "VoteBitsVersion", "bigint(20) NULL", "VoteBits", "UPDATE Users SET VoteBitsVersion = 3")
 
-	return dbMap
+	return dbMap, nil
 }
 
 // AddColumn checks if a column exists and adds it if it doesn't

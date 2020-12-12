@@ -1,4 +1,4 @@
-// Copyright (c) 2016-2019 The Decred developers
+// Copyright (c) 2016-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -6,6 +6,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -15,14 +16,12 @@ import (
 
 	"github.com/gorilla/csrf"
 
-	"github.com/decred/dcrd/rpcclient/v4"
 	"github.com/decred/dcrstakepool/controllers"
 	"github.com/decred/dcrstakepool/email"
 	"github.com/decred/dcrstakepool/signal"
 	"github.com/decred/dcrstakepool/stakepooldclient"
 	"github.com/decred/dcrstakepool/system"
 
-	"github.com/zenazn/goji/graceful"
 	"github.com/zenazn/goji/web"
 	"github.com/zenazn/goji/web/middleware"
 )
@@ -66,32 +65,27 @@ func runMain(ctx context.Context) error {
 		}
 	}()
 
-	var application = &system.Application{}
-
-	application.Init(ctx, wg, cfg.APISecret, cfg.BaseURL, cfg.CookieSecret,
+	application, err := system.Init(ctx, wg, cfg.APISecret, cfg.BaseURL, cfg.CookieSecret,
 		cfg.CookieSecure, cfg.DBHost, cfg.DBName, cfg.DBPassword, cfg.DBPort,
 		cfg.DBUser)
-	if application.DbMap == nil {
-		return fmt.Errorf("Failed to open database.")
+	if err != nil {
+		return err
 	}
 	if err = application.LoadTemplates(cfg.TemplatePath); err != nil {
-		return fmt.Errorf("Failed to load templates: %v", err)
+		return fmt.Errorf("failed to load templates: %v", err)
 	}
 
 	// Set up signal handler
 	// SIGUSR1 = Reload html templates (On nix systems)
 	system.ReloadTemplatesSig(application)
 
-	rpcclient.UseLogger(log)
-
 	// Supported API versions are advertised in the API stats result
 	APIVersionsSupported := []int{1, 2}
 
-	var stakepooldConnMan *stakepooldclient.StakepooldManager
-
-	stakepooldConnMan, err = stakepooldclient.ConnectStakepooldGRPC(cfg.StakepooldHosts, cfg.StakepooldCerts)
+	stakepooldConnMan, err := stakepooldclient.ConnectStakepooldGRPC(ctx, cfg.StakepooldHosts,
+		cfg.StakepooldCerts)
 	if err != nil {
-		return fmt.Errorf("Failed to connect to stakepoold host: %v", err)
+		return fmt.Errorf("failed to connect to stakepoold host: %v", err)
 	}
 
 	var sender email.Sender
@@ -99,8 +93,7 @@ func runMain(ctx context.Context) error {
 		sender, err = email.NewSender(cfg.SMTPHost, cfg.SMTPUsername, cfg.SMTPPassword,
 			cfg.SMTPFrom, cfg.UseSMTPS, cfg.SystemCerts, cfg.SMTPSkipVerify)
 		if err != nil {
-			application.Close()
-			return fmt.Errorf("Failed to initialize the smtp server: %v", err)
+			return fmt.Errorf("failed to initialize the smtp server: %v", err)
 		}
 	}
 
@@ -127,53 +120,48 @@ func runMain(ctx context.Context) error {
 		NetParams:            activeNetParams.Params,
 	}
 
-	controller, err := controllers.NewMainController(&controllerCfg)
-
+	controller, err := controllers.NewMainController(ctx, &controllerCfg)
 	if err != nil {
-		application.Close()
-		return fmt.Errorf("Failed to initialize the main controller: %v", err)
+		return fmt.Errorf("failed to initialize the main controller: %v", err)
 	}
 
 	// Check that dcrstakepool config and all stakepoold configs
 	// have the same value set for `coldwalletextpub`.
-	if err = controller.Cfg.StakepooldServers.CrossCheckColdWalletExtPubs(cfg.ColdWalletExtPub); err != nil {
-		application.Close()
+	if err = controller.Cfg.StakepooldServers.CrossCheckColdWalletExtPubs(ctx, cfg.ColdWalletExtPub); err != nil {
 		return err
 	}
 
 	// reset votebits if Vote Version changed or stored VoteBits are invalid
 	_, err = controller.CheckAndResetUserVoteBits(application.DbMap)
 	if err != nil {
-		application.Close()
 		return fmt.Errorf("failed to check and reset user vote bits: %v", err)
 	}
 
-	err = controller.StakepooldUpdateUsers(application.DbMap)
+	err = controller.StakepooldUpdateUsers(ctx, application.DbMap)
 	if err != nil {
 		return fmt.Errorf("StakepooldUpdateUsers failed: %v", err)
 	}
-	err = controller.StakepooldUpdateTickets(application.DbMap)
+	err = controller.StakepooldUpdateTickets(ctx, application.DbMap)
 	if err != nil {
 		return fmt.Errorf("StakepooldUpdateTickets failed: %v", err)
 	}
 	// Log the reported count of ignored/added/live tickets from each stakepoold
-	_, err = controller.Cfg.StakepooldServers.GetIgnoredLowFeeTickets()
+	_, err = controller.Cfg.StakepooldServers.GetIgnoredLowFeeTickets(ctx)
 	if err != nil {
 		return fmt.Errorf("StakepooldGetIgnoredLowFeeTickets failed: %v", err)
 	}
-	_, err = controller.Cfg.StakepooldServers.GetAddedLowFeeTickets()
+	_, err = controller.Cfg.StakepooldServers.GetAddedLowFeeTickets(ctx)
 	if err != nil {
 		return fmt.Errorf("StakepooldGetAddedLowFeeTickets failed: %v", err)
 	}
-	_, err = controller.Cfg.StakepooldServers.GetLiveTickets()
+	_, err = controller.Cfg.StakepooldServers.GetLiveTickets(ctx)
 	if err != nil {
 		return fmt.Errorf("StakepooldGetLiveTickets failed: %v", err)
 	}
 
-	err = controller.RPCSync(application.DbMap)
+	err = controller.RPCSync(ctx, application.DbMap)
 	if err != nil {
-		application.Close()
-		return fmt.Errorf("Failed to sync the wallets: %v",
+		return fmt.Errorf("failed to sync the wallets: %v",
 			err)
 	}
 
@@ -214,63 +202,63 @@ func runMain(ctx context.Context) error {
 		http.FileServer(http.Dir(cfg.PublicPath))))
 
 	// Home page
-	html.Get("/", application.Route(controller, "Index"))
+	html.Get("/", application.Route(controller.Index))
 
 	// Admin tickets page
-	html.Get("/admintickets", application.Route(controller, "AdminTickets"))
-	html.Post("/admintickets", application.Route(controller, "AdminTicketsPost"))
+	html.Get("/admintickets", application.Route(controller.AdminTickets))
+	html.Post("/admintickets", application.Route(controller.AdminTicketsPost))
 	// Admin status page
-	html.Get("/status", application.Route(controller, "AdminStatus"))
+	html.Get("/status", application.Route(controller.AdminStatus))
 
 	// Address form
-	html.Get("/address", application.Route(controller, "Address"))
-	html.Post("/address", application.Route(controller, "AddressPost"))
+	html.Get("/address", application.Route(controller.Address))
+	html.Post("/address", application.Route(controller.AddressPost))
 
 	// Email change/update confirmation
-	html.Get("/emailupdate", application.Route(controller, "EmailUpdate"))
+	html.Get("/emailupdate", application.Route(controller.EmailUpdate))
 
 	// Email verification
-	html.Get("/emailverify", application.Route(controller, "EmailVerify"))
+	html.Get("/emailverify", application.Route(controller.EmailVerify))
 
 	// Error page
-	html.Get("/error", application.Route(controller, "Error"))
+	html.Get("/error", application.Route(controller.Error))
 
 	// Password Reset routes
-	html.Get("/passwordreset", application.Route(controller, "PasswordReset"))
-	html.Post("/passwordreset", application.Route(controller, "PasswordResetPost"))
+	html.Get("/passwordreset", application.Route(controller.PasswordReset))
+	html.Post("/passwordreset", application.Route(controller.PasswordResetPost))
 
 	// Password Update routes
-	html.Get("/passwordupdate", application.Route(controller, "PasswordUpdate"))
-	html.Post("/passwordupdate", application.Route(controller, "PasswordUpdatePost"))
+	html.Get("/passwordupdate", application.Route(controller.PasswordUpdate))
+	html.Post("/passwordupdate", application.Route(controller.PasswordUpdatePost))
 
 	// Settings routes
-	html.Get("/settings", application.Route(controller, "Settings"))
-	html.Post("/settings", application.Route(controller, "SettingsPost"))
+	html.Get("/settings", application.Route(controller.Settings))
+	html.Post("/settings", application.Route(controller.SettingsPost))
 
 	// Login routes
-	html.Get("/login", application.Route(controller, "Login"))
-	html.Post("/login", application.Route(controller, "LoginPost"))
+	html.Get("/login", application.Route(controller.Login))
+	html.Post("/login", application.Route(controller.LoginPost))
 
 	// Register routes
-	html.Get("/register", application.Route(controller, "Register"))
-	html.Post("/register", application.Route(controller, "RegisterPost"))
+	html.Get("/register", application.Route(controller.Register))
+	html.Post("/register", application.Route(controller.RegisterPost))
 
 	// Captcha
 	static.Get("/captchas/*", controller.CaptchaServe)
 	html.Post("/verifyhuman", controller.CaptchaVerify)
 
 	// Stats
-	html.Get("/stats", application.Route(controller, "Stats"))
+	html.Get("/stats", application.Route(controller.Stats))
 
 	// Tickets
-	html.Get("/tickets", application.Route(controller, "Tickets"))
+	html.Get("/tickets", application.Route(controller.Tickets))
 
 	// Voting routes
-	html.Get("/voting", application.Route(controller, "Voting"))
-	html.Post("/voting", application.Route(controller, "VotingPost"))
+	html.Get("/voting", application.Route(controller.Voting))
+	html.Post("/voting", application.Route(controller.VotingPost))
 
 	// KTHXBYE
-	html.Get("/logout", application.Route(controller, "Logout"))
+	html.Get("/logout", application.Route(controller.Logout))
 
 	app.Handle("/api/*", api)
 	app.Handle("/*", html)
@@ -279,10 +267,6 @@ func runMain(ctx context.Context) error {
 	parent.Handle("/assets/*", static)
 	parent.Handle("/captchas/*", static)
 	parent.Handle("/*", app)
-
-	graceful.PostHook(func() {
-		application.Close()
-	})
 
 	app.Compile()
 
@@ -310,7 +294,7 @@ func runMain(ctx context.Context) error {
 
 	log.Infof("listening on %v", listener.Addr())
 
-	if err = server.Serve(listener); err != http.ErrServerClosed {
+	if err = server.Serve(listener); !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("Serve error: %s", err.Error())
 	}
 
@@ -329,4 +313,5 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	log.Info("server off")
 }

@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/base32"
 	"encoding/gob"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -63,7 +64,7 @@ func (s *SQLStore) New(r *http.Request, name string) (*sessions.Session, error) 
 	session.Options = &opts
 	c, err := r.Cookie(name)
 	if err != nil {
-		if err == http.ErrNoCookie {
+		if errors.Is(err, http.ErrNoCookie) {
 			return session, nil
 		}
 		return session, err
@@ -71,7 +72,7 @@ func (s *SQLStore) New(r *http.Request, name string) (*sessions.Session, error) 
 	err = securecookie.DecodeMulti(name, c.Value, &session.ID, s.codecs...)
 	if err != nil {
 		// these are not the sessions you are looking for
-		log.Infof("sqlstore: New: unable to decode cookie: %v", err)
+		log.Debugf("sqlstore: New: unable to decode cookie: %v", err)
 		return session, nil
 	}
 	err = s.load(session)
@@ -108,10 +109,10 @@ func (s *SQLStore) load(session *sessions.Session) error {
 	var dbSession models.Session
 	if err := s.dbMap.SelectOne(&dbSession, "SELECT * FROM Session WHERE Token = ?", session.ID); err != nil {
 		// if no rows are found nothing is done
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
-		return fmt.Errorf("Could not select session to destroy: %v", err)
+		return fmt.Errorf("could not select session to destroy: %v", err)
 	}
 	if dbSession.Expires < time.Now().Unix() {
 		return s.destroy(session)
@@ -127,17 +128,17 @@ func (s *SQLStore) save(session *sessions.Session) error {
 	var buf bytes.Buffer
 	var isNew bool
 	if err := s.dbMap.SelectOne(&dbSession, "SELECT * FROM Session WHERE Token = ?", session.ID); err != nil {
-		if err != sql.ErrNoRows {
-			return fmt.Errorf("Could not select session: %v", err)
+		if !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("could not select session: %v", err)
 		}
 		// no rows found so new
 		isNew = true
 	}
 	if userID, ok := session.Values["UserId"].(int64); ok {
-		dbSession.UserId = userID
+		dbSession.UserID = userID
 	} else {
-		// all sessions with no user specified are UserId -1
-		dbSession.UserId = -1
+		// all sessions with no user specified are UserID -1
+		dbSession.UserID = -1
 	}
 	if err := gob.NewEncoder(&buf).Encode(session.Values); err != nil {
 		return err
@@ -149,10 +150,10 @@ func (s *SQLStore) save(session *sessions.Session) error {
 		dbSession.Created = now
 		dbSession.Expires = now + int64(session.Options.MaxAge)
 		if err := s.dbMap.Insert(&dbSession); err != nil {
-			return fmt.Errorf("Could not insert session: %v", err)
+			return fmt.Errorf("could not insert session: %v", err)
 		}
 	} else if _, err := s.dbMap.Update(&dbSession); err != nil {
-		return fmt.Errorf("Could not update session: %v", err)
+		return fmt.Errorf("could not update session: %v", err)
 	}
 	return nil
 }
@@ -162,13 +163,13 @@ func (s *SQLStore) destroy(session *sessions.Session) error {
 	var dbSession models.Session
 	if err := s.dbMap.SelectOne(&dbSession, "SELECT * FROM Session WHERE Token = ?", session.ID); err != nil {
 		// if no rows are found nothing is done
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
-		return fmt.Errorf("Could not select session to destroy: %v", err)
+		return fmt.Errorf("could not select session to destroy: %v", err)
 	}
 	if _, err := s.dbMap.Delete(&dbSession); err != nil {
-		return fmt.Errorf("Could not destroy session: %v", err)
+		return fmt.Errorf("could not destroy session: %v", err)
 	}
 	return nil
 }
@@ -178,11 +179,11 @@ func (s *SQLStore) destroyExpiredSessions() error {
 	var dbSession models.Session
 	dbSessions, err := s.dbMap.Select(&dbSession, "SELECT * FROM Session WHERE Expires < ?", time.Now().Unix())
 	if err != nil {
-		return fmt.Errorf("Could not select expired sessions: %v", err)
+		return fmt.Errorf("could not select expired sessions: %v", err)
 	}
 	_, err = s.dbMap.Delete(dbSessions...)
 	if err != nil {
-		return fmt.Errorf("Could not destroy expired sessions: %v", err)
+		return fmt.Errorf("could not destroy expired sessions: %v", err)
 	}
 	return nil
 }
@@ -196,11 +197,11 @@ func DestroySessionsForUserID(dbMap *gorp.DbMap, userID int64) error {
 	var dbSession models.Session
 	dbSessions, err := dbMap.Select(&dbSession, "SELECT * FROM Session WHERE UserId = ?", userID)
 	if err != nil {
-		return fmt.Errorf("Could not select user sessions to destroy: %v", err)
+		return fmt.Errorf("could not select user sessions to destroy: %v", err)
 	}
 	_, err = dbMap.Delete(dbSessions...)
 	if err != nil {
-		return fmt.Errorf("Could not destroy user sessions: %v", err)
+		return fmt.Errorf("could not destroy user sessions: %v", err)
 	}
 	return nil
 }

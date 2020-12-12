@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"sync"
 
@@ -23,6 +22,8 @@ import (
 	"google.golang.org/grpc/codes"
 )
 
+// Application represents dcrstakepool's infrastructure, including html
+// templates and the mysql database.
 type Application struct {
 	APISecret     string
 	Template      *template.Template
@@ -39,11 +40,14 @@ func GojiWebHandlerFunc(h http.HandlerFunc) web.HandlerFunc {
 	}
 }
 
-func (application *Application) Init(ctx context.Context, wg *sync.WaitGroup,
+// Init initiates an Application with the passed variables.
+func Init(ctx context.Context, wg *sync.WaitGroup,
 	APISecret, baseURL, cookieSecret string, cookieSecure bool, DBHost,
-	DBName, DBPassword, DBPort, DBUser string) {
+	DBName, DBPassword, DBPort, DBUser string) (*Application, error) {
 
-	application.DbMap = models.GetDbMap(
+	var application Application
+	var err error
+	application.DbMap, err = models.GetDbMap(
 		APISecret,
 		baseURL,
 		DBUser,
@@ -51,6 +55,9 @@ func (application *Application) Init(ctx context.Context, wg *sync.WaitGroup,
 		DBHost,
 		DBPort,
 		DBName)
+	if err != nil {
+		return nil, err
+	}
 
 	hash := sha256.New()
 	io.WriteString(hash, cookieSecret)
@@ -64,6 +71,7 @@ func (application *Application) Init(ctx context.Context, wg *sync.WaitGroup,
 	}
 
 	application.APISecret = APISecret
+	return &application, nil
 }
 
 var funcMap = template.FuncMap{
@@ -72,6 +80,7 @@ var funcMap = template.FuncMap{
 	},
 }
 
+// LoadTemplates parses and loads all html templates found in templatePath.
 func (application *Application) LoadTemplates(templatePath string) error {
 	var templates []string
 
@@ -97,20 +106,17 @@ func (application *Application) LoadTemplates(templatePath string) error {
 	return err
 }
 
-func (application *Application) Close() {
-	log.Info("Application.Close() called")
-}
+// route is a type for http endpoints.
+type route func(web.C, *http.Request) (string, int)
 
-func (application *Application) Route(controller interface{}, route string) web.HandlerFunc {
+// Route calls methods from controllers/main, directs users based on the
+// returned status, and writes the response.
+func (application *Application) Route(fn route) web.HandlerFunc {
 	return func(c web.C, w http.ResponseWriter, r *http.Request) {
 		c.Env["Content-Type"] = "text/html"
 
-		// TODO: nuke Route and get rid of this reflect usage.
-		methodValue := reflect.ValueOf(controller).MethodByName(route)
-		methodInterface := methodValue.Interface()
-		method := methodInterface.(func(c web.C, r *http.Request) (string, int))
-
-		body, code := method(c, r)
+		// TODO: nuke Route.
+		body, code := fn(c, r)
 
 		// Save the session in c.Env["Session"].
 		if err := saveSession(c, w, r); err != nil {

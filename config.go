@@ -1,5 +1,5 @@
 // Copyright (c) 2013-2014 The btcsuite developers
-// Copyright (c) 2015-2019 The Decred developers
+// Copyright (c) 2015-2020 The Decred developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -8,6 +8,7 @@ package main
 import (
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"net"
@@ -17,9 +18,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/decred/dcrd/chaincfg/v2"
-	"github.com/decred/dcrd/dcrutil/v2"
-	"github.com/decred/dcrd/hdkeychain/v2"
+	"github.com/decred/dcrd/chaincfg/v3"
+	"github.com/decred/dcrd/dcrutil/v3"
+	"github.com/decred/dcrd/hdkeychain/v3"
 	"github.com/decred/dcrstakepool/internal/version"
 	flags "github.com/jessevdk/go-flags"
 )
@@ -70,9 +71,6 @@ type config struct {
 	Listen             string  `long:"listen" description:"Listen for connections on the specified interface/port (default all interfaces port: 9113, testnet: 19113)"`
 	TestNet            bool    `long:"testnet" description:"Use the test network"`
 	SimNet             bool    `long:"simnet" description:"Use the simulation test network"`
-	Profile            string  `long:"profile" description:"Deprecated: This config has no effect"`
-	CPUProfile         string  `long:"cpuprofile" description:"Deprecated: This config has no effect"`
-	MemProfile         string  `long:"memprofile" description:"Deprecated: This config has no effect"`
 	DebugLevel         string  `short:"d" long:"debuglevel" description:"Logging level for all subsystems {trace, debug, info, warn, error, critical} -- You may also specify <subsystem>=<level>,<subsystem2>=<level>,... to set the log level for individual subsystems -- Use show to list available subsystems"`
 	APISecret          string  `long:"apisecret" description:"Secret string used to encrypt API tokens."`
 	BaseURL            string  `long:"baseurl" description:"BaseURL to use when sending links via email"`
@@ -332,10 +330,12 @@ func loadConfig() (*config, []string, error) {
 	preParser := newConfigParser(&preCfg, &serviceOpts, flags.HelpFlag)
 	_, err := preParser.Parse()
 	if err != nil {
-		if e, ok := err.(*flags.Error); ok && e.Type == flags.ErrHelp {
+		var e *flags.Error
+		if errors.As(err, &e) && e.Type == flags.ErrHelp {
 			fmt.Fprintln(os.Stderr, err)
 			return nil, nil, err
 		}
+		return nil, nil, err
 	}
 
 	// Show the version and exit if the version flag was specified.
@@ -360,25 +360,26 @@ func loadConfig() (*config, []string, error) {
 	}
 
 	// Load additional config from file.
-	var configFileError error
 	parser := newConfigParser(&cfg, &serviceOpts, flags.Default)
 	if !(preCfg.SimNet) || preCfg.ConfigFile != defaultConfigFile {
 		err := flags.NewIniParser(parser).ParseFile(preCfg.ConfigFile)
 		if err != nil {
-			if _, ok := err.(*os.PathError); !ok {
+			var e *os.PathError
+			if !errors.As(err, &e) {
 				fmt.Fprintf(os.Stderr, "Error parsing config "+
 					"file: %v\n", err)
 				fmt.Fprintln(os.Stderr, usageMessage)
 				return nil, nil, err
 			}
-			configFileError = err
+			return nil, nil, err
 		}
 	}
 
 	// Parse command line options again to ensure they take precedence.
 	remainingArgs, err := parser.Parse()
 	if err != nil {
-		if e, ok := err.(*flags.Error); !ok || e.Type != flags.ErrHelp {
+		var e *flags.Error
+		if !errors.As(err, &e) || e.Type != flags.ErrHelp {
 			fmt.Fprintln(os.Stderr, usageMessage)
 		}
 		return nil, nil, err
@@ -391,7 +392,8 @@ func loadConfig() (*config, []string, error) {
 		// Show a nicer error message if it's because a symlink is
 		// linked to a directory that does not exist (probably because
 		// it's not mounted).
-		if e, ok := err.(*os.PathError); ok && os.IsExist(err) {
+		var e *os.PathError
+		if errors.As(err, &e) && os.IsExist(err) {
 			if link, lerr := os.Readlink(e.Path); lerr == nil {
 				str := "is symlink %s -> %s mounted?"
 				err = fmt.Errorf(str, e.Path, link)
@@ -589,30 +591,6 @@ func loadConfig() (*config, []string, error) {
 		if cfg.SMTPSkipVerify {
 			log.Warnf("SMTPCert has been set so SMTPSkipVerify is being disregarded.")
 		}
-	}
-
-	// Warn about deprecated config items if they have been set
-
-	if cfg.Profile != "" {
-		str := "%s: Config Profile is deprecated and has no effect. Please remove from your config file"
-		log.Warnf(str, funcName)
-	}
-
-	if cfg.CPUProfile != "" {
-		str := "%s: Config CPUProfile is deprecated and has no effect. Please remove from your config file"
-		log.Warnf(str, funcName)
-	}
-
-	if cfg.MemProfile != "" {
-		str := "%s: Config MemProfile is deprecated and has no effect. Please remove from your config file"
-		log.Warnf(str, funcName)
-	}
-
-	// Warn about missing config file only after all other configuration is
-	// done.  This prevents the warning on help messages and invalid
-	// options.  Note this should go directly before the return.
-	if configFileError != nil {
-		log.Warnf("%v", configFileError)
 	}
 
 	return &cfg, remainingArgs, nil
