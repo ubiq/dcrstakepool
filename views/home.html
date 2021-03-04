@@ -15,8 +15,6 @@
 
             <p>{{$.CustomDescription}}</p>
 
-            <p>Support email:&nbsp;<a href="mailto:{{$.PoolEmail}}" rel="noopener noreferrer">{{$.PoolEmail}}</a></p>
-
             {{if not .User}}
               <a href="/register" class="btn btn-outline-primary btn-outline-primary--inverted d-lg-inline-block d-block mb-3">Register</a>
             {{end}}
@@ -118,19 +116,6 @@
             </div>
           </div>
         </section>
-      </div>
-      <div class="row ml-1">
-        <div class="col-12 block__content">
-          <h2>All Voting Service Providers</h2>
-          <p>To encourage decentralization of the network, it is recommended to avoid VSPs that have over 5% of network votes.</p>
-          <div id="stakepool-data" data-ismainnet="{{ if eq .Network "mainnet"}}true{{else}}false{{end}}" class="table-scroll-y text-nowrap mb-4">
-            <noscript>
-              <div class="row col-12 block__description">
-                <p>Enable Javascript to see all available VSPs</p>
-              </div>
-            </noscript>
-          </div>
-        </div>
       </div>
     </div>
   </div>
